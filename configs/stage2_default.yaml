@@ -1,0 +1,48 @@
+baseline: B2-hybrid
+comm_mode: materialized
+thermal_scenario: no_throttling
+r: [0, 0.25, 0.5, 0.75, 1.0]
+channels:
+  local_hbm:
+    stack:
+      bw_bps: 1.2e12
+      capacity_bytes: 16e9
+    count: [4]
+    max_count: 4
+    address_mapping:
+      policy: uniform
+      weights: null
+  side_hbm:
+    bw_bps: 4.8e12
+    latency_s: 50e-9
+  h2h:
+    # UCIe 1.0/1.1 Advanced Package 공식 data rate <-> bump pitch 페어링으로 교체.
+    # 12 GT/s@25um, 24 GT/s@36um, 32 GT/s@45um (Chiu et al., "High-performance,
+    # power-efficient three-dimensional system-in-package designs with universal
+    # chiplet interconnect express," Nature Electronics, 2024). 기존 [13,32,48]의
+    # 13/48은 UCIe 1.x/2.0 Advanced Package 표에 없는 값이었음 (13은 12의 오기로 추정,
+    # 48은 UCIe 3.0(2025)의 2D/2.5D 전용 신규 rate라 이 표와 세대가 다름 -- 필요하면
+    # 4번째 sweep point로 별도 추가 검토).
+    lane_rate_gbps: [12, 24, 32]
+    latency_s: 20e-9
+    n_pillar: [4, 8, 16, 32]
+    # TODO(태현): 근거 없음 -- 공개 문헌으로 이 프로젝트의 base die shoreline/via 면적
+    # 예산을 특정할 수 없었음(HBM base die 정확한 floorplan은 비공개). Stage 3에서
+    # 실제 floorplan이 나오면 교체할 것. 지금은 64를 그대로 유지.
+    n_pillar_max: 64
+  gpu_direct:
+    # MCM-GPU(Arunkumar et al., "MCM-GPU: Multi-Chip-Module GPUs for Continued
+    # Performance Scalability," ISCA 2017)가 on-package GPU 모듈간 직접 링크로 선택한
+    # "low-effort, low-cost, low-energy" 설계점: 768 GB/s, 32-cycle hop latency.
+    # latency는 논문의 32-cycle을 초 단위로 정확히 환산할 GPU clock을 확인하지 못해
+    # (본 세션에서 원문 전체를 확인하지 못함) 기존 20ns를 그대로 유지 -- 32 cycle이
+    # 나오려면 ~1.6GHz 클럭을 가정해야 하므로 자릿수는 맞으나 확정값은 아님.
+    bw_bps: TBD
+    latency_s: TBD
+workload:
+  model: Llama-70B
+  tp: 4
+  pp: 1
+  seq_len: 4096
+  batch: 1
+  r_remote: [0, 0.1, 0.25, 0.5]

@@ -1,0 +1,9 @@
+.venv/
+.pytest_cache/
+__pycache__/
+*.pyc
+
+# External reference simulators (separate upstream projects, not tracked here)
+accel-sim/
+astra-sim/
+book-sim/
