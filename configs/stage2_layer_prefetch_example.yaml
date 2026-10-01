@@ -1,0 +1,55 @@
+# Example scenario inputs for the dedicated layer-ready prefetch engine.
+# These are not measured DDR, CXL, HBM, or uHBM technology presets.
+mode: layer_prefetch
+architectures:
+  - name: B0-2.5D
+    kind: b0_2_5d
+    lane_count: 8
+    local_memory:
+      capacity_bytes: 48e9
+      bw_bps: 1.2e12
+      latency_s: 1.0e-7
+      energy_pj_per_bit: 4.33
+  - name: B2-uHBM
+    kind: b2_uhbm
+    lane_count: 8
+    local_memory:
+      capacity_bytes: 12e9
+      bw_bps: 2.4e12
+      latency_s: 0.0
+      energy_pj_per_bit: 4.33
+    side_hbm:
+      capacity_bytes: 48e9
+      bw_bps: 1.2e12
+      latency_s: 5.0e-8
+      energy_pj_per_bit: 4.33
+    side_link:
+      bw_bps: 256e9
+      latency_s: 2.0e-8
+      energy_pj_per_bit: 0.54
+capacity_memory:
+  device:
+    capacity_bytes: 64e9
+    read_bw_bps: 256e9
+    read_latency_s: 1.5e-7
+    read_energy_pj_per_bit: 6.0
+  link:
+    bw_bps: 128e9
+    latency_s: 4.0e-8
+    energy_pj_per_bit: 1.0
+    distance_mm: 20.0
+prefetch:
+  weight_residency_policy: [persistent_if_fit, streaming]
+  weight_chunk_bytes: [1048576]
+  kv_chunk_bytes: [262144]
+  kv_writeback_chunk_bytes: [65536]
+  max_inflight_chunks_per_lane: [1, 4, null]
+workload:
+  run_mode: [prefill_only, decode_only, prefill_decode]
+  start_state: [cold_start, steady_state]
+  model: Llama-70B
+  tp: 4
+  pp: 1
+  seq_len: 4096
+  batch: [1, 8]
+  decode_tokens: [1, 8, 32]
