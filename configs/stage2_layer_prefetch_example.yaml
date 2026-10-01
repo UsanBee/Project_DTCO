@@ -38,6 +38,17 @@ capacity_memory:
     latency_s: 4.0e-8
     energy_pj_per_bit: 1.0
     distance_mm: 20.0
+execution:
+  # Scenario inputs reused by the strict D-2/D-1 execution path.
+  gpu_peak_flops: 990e12
+  r: 0.0
+  comm_mode: materialized
+  h2h_bw_bps: 336e9
+  h2h_latency_s: 2.0e-8
+  gpu_direct_bw_bps: 768e9
+  gpu_direct_latency_s: 2.0e-8
+  base_die_latency_s: 5.0e-9
+  include_materialized_endpoints: true
 prefetch:
   weight_residency_policy: [persistent_if_fit, streaming]
   weight_chunk_bytes: [1048576]

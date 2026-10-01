@@ -60,6 +60,21 @@ class CapacityMemoryConfig:
 
 
 @dataclass(frozen=True)
+class PrefetchExecutionConfig:
+    """Explicit compute and strict D-1 collective scenario inputs."""
+
+    gpu_peak_flops: float
+    r: float
+    comm_mode: str
+    h2h_bw_bps: float
+    h2h_latency_s: float
+    gpu_direct_bw_bps: float
+    gpu_direct_latency_s: float
+    base_die_latency_s: float
+    include_materialized_endpoints: bool
+
+
+@dataclass(frozen=True)
 class ArchitectureConfig:
     name: str
     kind: str
@@ -95,6 +110,7 @@ class PrefetchSimulationConfig:
     mode: str
     architectures: tuple[ArchitectureConfig, ...]
     capacity_memory: CapacityMemoryConfig
+    execution: PrefetchExecutionConfig
     prefetch: PrefetchPolicyConfig
     workload: PrefetchWorkloadConfig
 
@@ -292,6 +308,54 @@ def load_prefetch_config(path: str | Path) -> PrefetchSimulationConfig:
         ),
     )
 
+    execution_raw = _mapping(
+        _required(root, "execution", "configuration"), "execution"
+    )
+    r = _nonnegative_float(_required(execution_raw, "r", "execution"), "execution.r")
+    if r > 1.0:
+        raise PrefetchConfigError("execution.r must be within [0, 1]")
+    comm_mode = str(_required(execution_raw, "comm_mode", "execution"))
+    if comm_mode not in {"materialized", "cut_through"}:
+        raise PrefetchConfigError(
+            "execution.comm_mode must be materialized or cut_through"
+        )
+    include_endpoints = _required(
+        execution_raw, "include_materialized_endpoints", "execution"
+    )
+    if not isinstance(include_endpoints, bool):
+        raise PrefetchConfigError(
+            "execution.include_materialized_endpoints must be boolean"
+        )
+    execution = PrefetchExecutionConfig(
+        gpu_peak_flops=_positive_float(
+            _required(execution_raw, "gpu_peak_flops", "execution"),
+            "execution.gpu_peak_flops",
+        ),
+        r=r,
+        comm_mode=comm_mode,
+        h2h_bw_bps=_positive_float(
+            _required(execution_raw, "h2h_bw_bps", "execution"),
+            "execution.h2h_bw_bps",
+        ),
+        h2h_latency_s=_nonnegative_float(
+            _required(execution_raw, "h2h_latency_s", "execution"),
+            "execution.h2h_latency_s",
+        ),
+        gpu_direct_bw_bps=_positive_float(
+            _required(execution_raw, "gpu_direct_bw_bps", "execution"),
+            "execution.gpu_direct_bw_bps",
+        ),
+        gpu_direct_latency_s=_nonnegative_float(
+            _required(execution_raw, "gpu_direct_latency_s", "execution"),
+            "execution.gpu_direct_latency_s",
+        ),
+        base_die_latency_s=_nonnegative_float(
+            _required(execution_raw, "base_die_latency_s", "execution"),
+            "execution.base_die_latency_s",
+        ),
+        include_materialized_endpoints=include_endpoints,
+    )
+
     prefetch_raw = _mapping(
         _required(root, "prefetch", "configuration"), "prefetch"
     )
@@ -377,6 +441,7 @@ def load_prefetch_config(path: str | Path) -> PrefetchSimulationConfig:
         mode=mode,
         architectures=architectures,
         capacity_memory=capacity_memory,
+        execution=execution,
         prefetch=prefetch,
         workload=workload,
     )

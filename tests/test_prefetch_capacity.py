@@ -233,3 +233,29 @@ def test_policy_inputs_must_be_single_expanded_sweep_points():
             _architecture("b0_2_5d", 1e12), _workload(), policy
         )
 
+
+def test_steady_state_capacity_includes_the_executed_warmup_token():
+    """Ignoring warmup KV growth would mark an actually overflowing run feasible."""
+    from uhbm_simulator.prefetch_workload import (
+        InfeasibilityReason,
+        decide_weight_residency,
+    )
+
+    workload = replace(
+        _workload(decode_tokens=1),
+        start_state_values=("steady_state",),
+    )
+    initial = build_layer_plans(
+        "Llama-70B", 4, 4096, 1, phase="decode", decode_tokens=2, token_index=0
+    )
+    initial_kv = math.fsum(plan.lanes[0].historical_kv_bytes for plan in initial)
+    increment = math.fsum(plan.lanes[0].new_kv_bytes for plan in initial)
+    result = decide_weight_residency(
+        _architecture("b2_uhbm", 1e12, initial_kv + 1.5 * increment),
+        workload,
+        _policy("streaming"),
+    )
+
+    assert not result.feasible
+    assert result.reason is InfeasibilityReason.SIDE_KV_CAPACITY
+    assert result.first_infeasible_token == 2

@@ -167,10 +167,16 @@ def _capacity_timeline(
     workload: PrefetchWorkloadConfig,
 ) -> tuple[_TokenCapacityState, ...]:
     run_mode = _single(workload.run_mode_values, "workload.run_mode")
-    _single(workload.start_state_values, "workload.start_state")
+    start_state = _single(workload.start_state_values, "workload.start_state")
     decode_tokens = _single(workload.decode_tokens_values, "workload.decode_tokens")
     if decode_tokens <= 0:
         raise ValueError("workload.decode_tokens must be positive")
+    decode_steps = decode_tokens + (
+        1
+        if start_state == "steady_state"
+        and run_mode in {"decode_only", "prefill_decode"}
+        else 0
+    )
 
     states = []
     if run_mode in {"prefill_only", "prefill_decode"}:
@@ -190,9 +196,9 @@ def _capacity_timeline(
                 workload,
                 phase="decode",
                 token_index=token_index,
-                decode_tokens=decode_tokens,
+                decode_tokens=decode_steps,
             )
-            for token_index in range(decode_tokens)
+            for token_index in range(decode_steps)
         )
     if not states:
         raise ValueError(f"unsupported workload.run_mode: {run_mode}")

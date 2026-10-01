@@ -43,6 +43,16 @@ capacity_memory:
     latency_s: 4.0e-8
     energy_pj_per_bit: 1.0
     distance_mm: 20.0
+execution:
+  gpu_peak_flops: 990e12
+  r: 0.0
+  comm_mode: materialized
+  h2h_bw_bps: 336e9
+  h2h_latency_s: 2.0e-8
+  gpu_direct_bw_bps: 768e9
+  gpu_direct_latency_s: 2.0e-8
+  base_die_latency_s: 5.0e-9
+  include_materialized_endpoints: true
 prefetch:
   weight_residency_policy: [persistent_if_fit, streaming]
   weight_chunk_bytes: [1048576]
@@ -86,6 +96,9 @@ def test_loads_eight_lane_b0_b2_and_technology_neutral_profiles(tmp_path):
     assert config.capacity_memory.device.read_bw_bps == 256e9
     assert config.capacity_memory.link.bw_bps == 128e9
     assert config.capacity_memory.link.distance_mm == 20.0
+    assert config.execution.gpu_peak_flops == 990e12
+    assert config.execution.h2h_bw_bps == 336e9
+    assert config.execution.comm_mode == "materialized"
 
 
 def test_loads_independent_chunk_depth_and_workload_sweep_axes(tmp_path):
@@ -157,4 +170,3 @@ def test_rejects_capacity_memory_too_small_for_one_lane_weight_backing(tmp_path)
         match="capacity_memory.*weight backing",
     ):
         _module().load_prefetch_config(_write(tmp_path, text))
-
