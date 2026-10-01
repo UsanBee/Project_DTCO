@@ -97,3 +97,19 @@ def test_collective_transport_metrics_and_energy_use_collective_resources():
     assert metrics.energy_by_domain_j["collective_h2h"] == pytest.approx(
         h2h.energy_j
     )
+
+
+def test_prefetch_production_paths_have_no_unclassified_transfer_requests():
+    """Every memory or transport request in the new engine must be tagged."""
+    _, result, _ = _result_and_metrics()
+    offenders = {}
+    for resource in result.resources:
+        if "gpu_compute" in resource.name:
+            continue
+        unclassified = resource.stats.by_traffic_class.get(
+            TrafficClass.UNCLASSIFIED
+        )
+        if unclassified is not None and unclassified.request_count:
+            offenders[resource.name] = unclassified.request_count
+
+    assert offenders == {}

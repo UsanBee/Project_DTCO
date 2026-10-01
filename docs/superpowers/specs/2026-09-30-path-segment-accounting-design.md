@@ -62,6 +62,15 @@ Production transfer requests use one of these fixed traffic-class strings:
 | `side_independent_transport` | Logical independent-path crossing used for bytes and crossing energy only |
 | `collective_h2h_transport` | Collective payload traversing H2H ring edges |
 | `collective_gpu_direct_transport` | Collective payload traversing the GPU-direct resource |
+| `capacity_memory_read` | Weight bytes read from a paired capacity-memory device |
+| `capacity_to_uhbm` | Weight payload transported directly to its paired uHBM lane |
+| `capacity_to_2_5d_hbm` | Weight payload transported to its paired conventional HBM lane |
+| `side_hbm_read` / `side_hbm_write` | Historical-KV read or new-KV write in the paired side HBM |
+| `side_to_uhbm` / `uhbm_to_side` | Bidirectional KV payload on the shared paired side link |
+| `uhbm_gpu_read` / `gpu_uhbm_write` | GPU access to a B2 local uHBM lane |
+| `uhbm_prefetch_write` / `uhbm_writeback_read` | B2 local staging endpoint accesses |
+| `hbm_2_5d_gpu_read` / `gpu_hbm_2_5d_write` | GPU access to a B0 conventional-HBM lane |
+| `hbm_2_5d_prefetch_write` | B0 local weight-prefetch endpoint access |
 | `unclassified` | Compatibility fallback for direct/custom `RateResource.use(amount)` calls |
 
 The names are constants in the resource/accounting layer rather than repeated
@@ -102,6 +111,13 @@ metric = result.resource_metrics["h2h_link[1,2]"]
 collective = metric.by_traffic_class["collective_h2h_transport"]
 side = metric.by_traffic_class["side_shared_h2h_transport"]
 ```
+
+The dedicated layer-prefetch engine exposes the same tagged observations
+through `calculate_prefetch_metrics(config, result).paths`. Its summary CSV
+stores a deterministic JSON mapping in `path_metrics_json`; it does not emit a
+second per-lane or per-chunk CSV. Capacity-device service, capacity-link
+transport, local-memory endpoint service, side-HBM service, paired side-link
+transport, and D-1 collective transport remain separate accounting domains.
 
 ## Run-level path metrics
 

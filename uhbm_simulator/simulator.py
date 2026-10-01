@@ -9,7 +9,7 @@ import simpy
 
 from stage1_model import ring_allreduce_round_count
 from uhbm_simulator.config import ChannelsConfig, h2h_energy_pj_per_bit
-from uhbm_simulator.resources import RateResource, build_resource_layer
+from uhbm_simulator.resources import TrafficClass, RateResource, build_resource_layer
 from uhbm_simulator.workload import (
     SideHBMCapacityError,
     StageTrafficStreams,
@@ -378,9 +378,14 @@ def _use_local_hbm(
     tile: int,
     amount: float,
     parameters: SimulationParameters,
+    traffic_class: str = TrafficClass.UNCLASSIFIED,
 ):
     events = [
-        env.process(resources.local_hbm[(tile, stack)].use(amount * fraction))
+        env.process(
+            resources.local_hbm[(tile, stack)].use(
+                amount * fraction, traffic_class
+            )
+        )
         for stack, fraction in enumerate(_local_hbm_fractions(parameters))
         if amount > 0.0 and fraction > 0.0
     ]
@@ -632,7 +637,11 @@ def _h2h_edge_transfer(
     counter: list[float],
 ):
     """Transfer payload over one physical H2H edge and record actual bytes."""
-    yield env.process(resources.h2h_link[edge].use(amount))
+    yield env.process(
+        resources.h2h_link[edge].use(
+            amount, TrafficClass.COLLECTIVE_H2H_TRANSPORT
+        )
+    )
     if parameters.base_die_latency_s > 0.0:
         yield env.timeout(parameters.base_die_latency_s)
     counter.append(amount)
@@ -716,6 +725,7 @@ class RingCollectiveCoordinator:
                             requester,
                             amount,
                             self.parameters,
+                            TrafficClass.COLLECTIVE_SOURCE_READ,
                         )
                     )
                 )
@@ -766,6 +776,7 @@ class RingCollectiveCoordinator:
                         requester,
                         amount,
                         self.parameters,
+                        TrafficClass.COLLECTIVE_FINAL_WRITE,
                     )
                 )
                 for requester, (amount, _) in submissions.items()
@@ -781,6 +792,7 @@ class RingCollectiveCoordinator:
                         requester,
                         amount,
                         self.parameters,
+                        TrafficClass.COLLECTIVE_FINAL_REREAD,
                     )
                 )
                 for requester, (amount, _) in submissions.items()
@@ -798,7 +810,7 @@ class RingCollectiveCoordinator:
             events.append(
                 self.env.process(
                     self.resources.gpu_direct_link[(requester, destination)].use(
-                        amount
+                        amount, TrafficClass.COLLECTIVE_GPU_DIRECT_TRANSPORT
                     )
                 )
             )

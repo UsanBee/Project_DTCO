@@ -59,6 +59,92 @@ WSL/Linux에서는 실행 파일을 `.venv/bin/python`으로 바꾸면 된다.
 `comm_mode`를 `cut_through`로 바꿔 upper-bound 경로를 실행할 수 있다. 기본값과 검증
 기준은 `materialized`다.
 
+## Dedicated layer-prefetch memory hierarchy
+
+The legacy Stage 2 engine and its existing YAML/CSV schema remain the default.
+The opt-in `layer_prefetch` engine answers a narrower question: whether all
+weight and historical-KV chunks for the next transformer layer can reach an
+eight-lane local-memory staging tier before that layer may execute. It uses a
+full-layer-ready barrier; intra-layer streaming into compute is deliberately
+not modeled.
+
+The dedicated B0 and B2 abstractions are symmetric and lane-paired:
+
+- B0 has eight 48 GB conventional 2.5D-HBM lanes. Capacity memory feeds each
+  paired HBM directly; KV remains resident in that HBM.
+- B2 has eight 12 GB uHBM lanes, eight paired 48 GB side-HBM devices, and eight
+  paired capacity-memory devices. Weight arrives directly from capacity memory
+  to uHBM. Historical KV is prefetched from paired side HBM to uHBM and newly
+  generated KV is written back over the same bidirectional, FCFS side link.
+
+Capacity memory is a per-lane backing store. Its device bandwidth/latency/
+energy and the longer capacity-to-local link are explicit scenario inputs.
+They are technology-neutral placeholders, not calibrated DDR, CXL, HBM, or
+uHBM product specifications. The example profile is therefore named
+`uncalibrated_example`.
+
+`persistent_if_fit` first attempts atomic full-model weight persistence after
+mandatory KV/staging capacity is reserved; if it does not fit, the model falls
+back to layer streaming. `streaming` always fetches layer weight. Transfers are
+split into the configured weight/KV/writeback chunks. A finite
+`max_inflight_chunks_per_lane` shares descriptors between prefetch and
+writeback; `null` leaves descriptor count unbounded while the byte-rate
+resources still serialize traffic.
+
+`fresh prefill` starts without fabricated prefetched data. Decode is continuous:
+KV grows token by token and B2 writes new KV through uHBM to side HBM. A
+`cold_start` includes layer-0 fetch cost. `steady_state` executes one causally
+valid strict-D1/D2 warm-up token and excludes only that token from reported
+decode timing; it does not use the relaxed collective DAG or assume a free
+layer-0 buffer. `pp=1` remains fixed.
+
+Run the small two-point B0/B2 example with:
+
+```powershell
+.\.venv\Scripts\python.exe -m uhbm_simulator.prefetch_sweep `
+  --config configs\stage2_layer_prefetch_example.yaml `
+  --output results\stage2_layer_prefetch_example.csv
+```
+
+The sweep is a true Cartesian product over architecture, capacity-memory
+profile, phase/start state, batch, decode-token count, weight policy, the three
+chunk sizes, and in-flight depth. Infeasible points remain in the CSV with
+identity and capacity reason populated; simulation-derived values are empty.
+Summary rows contain latency/throughput, residency, dynamic energy, local-lane
+mean/max utilization and the critical lane. `path_metrics_json` contains each
+declared path's actual bytes, request count, accumulated queue/service/fixed-
+latency time, and dynamic energy. Token/layer/lane traces are available only
+through `run_prefetch_simulation(..., detailed_trace=True)` and are not copied
+into every CSV row.
+
+Example path query:
+
+```python
+from uhbm_simulator.prefetch_sweep import calculate_prefetch_metrics
+from uhbm_simulator.resources import TrafficClass
+
+result = run_prefetch_simulation(point, detailed_trace=True)
+paths = calculate_prefetch_metrics(point, result).paths
+gpu_reads = paths[TrafficClass.UHBM_GPU_READ]
+side_prefetch = paths[TrafficClass.SIDE_TO_UHBM]
+collective = paths[TrafficClass.COLLECTIVE_H2H_TRANSPORT]
+```
+
+These times are sums charged to resources, not exposed critical-path time.
+They may exceed `elapsed_s` because lanes and paths overlap. The simulator does
+not infer energy from utilization: every dynamic term is actual transferred
+bytes times the configured pJ/bit for that physical device or link segment.
+Side-HBM datapath and side-link crossing are separate segments, so neither is
+silently omitted or charged twice. H2H and GPU-direct collective transport use
+the dedicated execution profile's nominal energy anchors; all such scenario
+numbers remain placeholders until Stage 3/4 calibration.
+
+The model still does not simulate bit-level address mapping, HBM banks/channels,
+page migration, predictors for dynamic expert selection, PDN/IR-drop, thermal
+physics, EM, or packet routers. Layer order is statically known for the dense
+Llama-2 presets; the engine evaluates transfer feasibility and scheduling, not
+whether an arbitrary future layer can be predicted.
+
 ## Sensitivity analysis
 
 다음 명령은 한 번에 한 축만 바꾸는 OAT(one-at-a-time) 분석을 실행하고 축당 한 행을
