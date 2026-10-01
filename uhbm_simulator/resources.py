@@ -2,9 +2,45 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import simpy
+
+
+class TrafficClass:
+    """Declared transfer-accounting categories shared by both Stage 2 engines."""
+
+    UNCLASSIFIED = "unclassified"
+    LOCAL_WORKLOAD_READ = "local_workload_read"
+    COLLECTIVE_SOURCE_READ = "collective_source_read"
+    COLLECTIVE_FINAL_WRITE = "collective_final_write"
+    COLLECTIVE_FINAL_REREAD = "collective_final_reread"
+    SIDE_HBM_DATAPATH_READ = "side_hbm_datapath_read"
+    SIDE_SHARED_H2H_TRANSPORT = "side_shared_h2h_transport"
+    SIDE_PILLAR_TRANSPORT = "side_pillar_transport"
+    SIDE_INDEPENDENT_TRANSPORT = "side_independent_transport"
+    COLLECTIVE_H2H_TRANSPORT = "collective_h2h_transport"
+    COLLECTIVE_GPU_DIRECT_TRANSPORT = "collective_gpu_direct_transport"
+    CAPACITY_MEMORY_READ = "capacity_memory_read"
+    CAPACITY_TO_UHBM = "capacity_to_uhbm"
+    CAPACITY_TO_2_5D_HBM = "capacity_to_2_5d_hbm"
+    SIDE_HBM_READ = "side_hbm_read"
+    SIDE_HBM_WRITE = "side_hbm_write"
+    SIDE_TO_UHBM = "side_to_uhbm"
+    UHBM_TO_SIDE = "uhbm_to_side"
+    UHBM_GPU_READ = "uhbm_gpu_read"
+    GPU_UHBM_WRITE = "gpu_uhbm_write"
+    UHBM_PREFETCH_WRITE = "uhbm_prefetch_write"
+    UHBM_WRITEBACK_READ = "uhbm_writeback_read"
+    HBM_2_5D_GPU_READ = "hbm_2_5d_gpu_read"
+    GPU_HBM_2_5D_WRITE = "gpu_hbm_2_5d_write"
+    HBM_2_5D_PREFETCH_WRITE = "hbm_2_5d_prefetch_write"
+
+    ALL = frozenset(
+        value
+        for name, value in vars().items()
+        if name.isupper() and name != "ALL" and isinstance(value, str)
+    )
 
 
 @dataclass
@@ -15,6 +51,10 @@ class ResourceStats:
     total_service_time_s: float = 0.0
     total_latency_time_s: float = 0.0
     first_service_start_s: float | None = None
+    by_traffic_class: dict[str, "ResourceStats"] = field(
+        default_factory=dict,
+        repr=False,
+    )
 
     def utilization(self, elapsed_s: float, capacity: int = 1) -> float:
         if elapsed_s <= 0:
@@ -46,9 +86,14 @@ class RateResource:
         self._resource = simpy.Resource(env, capacity=capacity)
         self.stats = ResourceStats()
 
-    def use(self, amount: float):
+    def use(self, amount: float, traffic_class: str = TrafficClass.UNCLASSIFIED):
         if amount < 0:
             raise ValueError("resource amount cannot be negative")
+        if traffic_class not in TrafficClass.ALL:
+            raise ValueError(f"unknown traffic_class: {traffic_class}")
+        return self._use(amount, traffic_class)
+
+    def _use(self, amount: float, traffic_class: str):
         queued_at = self.env.now
         with self._resource.request() as request:
             yield request
@@ -61,6 +106,18 @@ class RateResource:
             self.stats.total_latency_time_s += self.latency_s
             if self.stats.first_service_start_s is None:
                 self.stats.first_service_start_s = self.env.now
+
+            class_stats = self.stats.by_traffic_class.setdefault(
+                traffic_class,
+                ResourceStats(),
+            )
+            class_stats.request_count += 1
+            class_stats.transferred_amount += amount
+            class_stats.total_queue_time_s += queue_time
+            class_stats.total_service_time_s += service_time
+            class_stats.total_latency_time_s += self.latency_s
+            if class_stats.first_service_start_s is None:
+                class_stats.first_service_start_s = self.env.now
             yield self.env.timeout(service_time)
         if self.latency_s:
             yield self.env.timeout(self.latency_s)

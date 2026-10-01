@@ -2,7 +2,7 @@ from collections import defaultdict
 
 import pytest
 
-from uhbm_simulator.resources import RateResource
+from uhbm_simulator.resources import RateResource, TrafficClass
 from uhbm_simulator.simulator import SimulationParameters, run_simulation
 from uhbm_simulator.workload import TrafficSignature
 
@@ -37,9 +37,11 @@ def _run_strict_with_resource_trace(monkeypatch):
     ends = defaultdict(list)
     original_use = RateResource.use
 
-    def traced_use(resource, amount):
+    def traced_use(
+        resource, amount, traffic_class=TrafficClass.UNCLASSIFIED
+    ):
         starts[resource].append(resource.env.now)
-        yield from original_use(resource, amount)
+        yield from original_use(resource, amount, traffic_class)
         ends[resource].append(resource.env.now)
 
     monkeypatch.setattr(RateResource, "use", traced_use)

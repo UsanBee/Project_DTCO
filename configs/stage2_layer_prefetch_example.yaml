@@ -1,0 +1,69 @@
+# Example scenario inputs for the dedicated layer-ready prefetch engine.
+# These are not measured DDR, CXL, HBM, or uHBM technology presets.
+mode: layer_prefetch
+architectures:
+  - name: B0-2.5D
+    kind: b0_2_5d
+    lane_count: 8
+    local_memory:
+      capacity_bytes: 48e9
+      bw_bps: 1.2e12
+      latency_s: 1.0e-7
+      energy_pj_per_bit: 4.33
+  - name: B2-uHBM
+    kind: b2_uhbm
+    lane_count: 8
+    local_memory:
+      capacity_bytes: 12e9
+      bw_bps: 2.4e12
+      latency_s: 0.0
+      energy_pj_per_bit: 4.33
+    side_hbm:
+      capacity_bytes: 48e9
+      bw_bps: 1.2e12
+      latency_s: 5.0e-8
+      energy_pj_per_bit: 4.33
+    side_link:
+      bw_bps: 256e9
+      latency_s: 2.0e-8
+      energy_pj_per_bit: 0.54
+capacity_memory:
+  name: uncalibrated_example
+  device:
+    capacity_bytes: 64e9
+    read_bw_bps: 256e9
+    read_latency_s: 1.5e-7
+    read_energy_pj_per_bit: 6.0
+  link:
+    bw_bps: 128e9
+    latency_s: 4.0e-8
+    energy_pj_per_bit: 1.0
+    distance_mm: 20.0
+execution:
+  # Scenario inputs reused by the strict D-2/D-1 execution path.
+  gpu_peak_flops: 990e12
+  r: 0.0
+  comm_mode: materialized
+  h2h_bw_bps: 336e9
+  h2h_latency_s: 2.0e-8
+  gpu_direct_bw_bps: 768e9
+  gpu_direct_latency_s: 2.0e-8
+  base_die_latency_s: 5.0e-9
+  include_materialized_endpoints: true
+  h2h_energy_pj_per_bit: 0.30
+  gpu_direct_energy_pj_per_bit: 0.54
+prefetch:
+  weight_residency_policy: [streaming]
+  weight_chunk_bytes: [1000000000000]
+  kv_chunk_bytes: [1000000000000]
+  kv_writeback_chunk_bytes: [1000000000000]
+  max_inflight_chunks_per_lane: [null]
+workload:
+  run_mode: [decode_only]
+  start_state: [cold_start]
+  model: Llama-7B
+  tp: 2
+  pp: 1
+  seq_len: 64
+  batch: [1]
+  decode_tokens: [1]
