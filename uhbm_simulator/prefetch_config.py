@@ -57,6 +57,7 @@ class CapacityMemoryDeviceConfig:
 class CapacityMemoryConfig:
     device: CapacityMemoryDeviceConfig
     link: LinkConfig
+    name: str = "scenario"
 
 
 @dataclass(frozen=True)
@@ -72,6 +73,9 @@ class PrefetchExecutionConfig:
     gpu_direct_latency_s: float
     base_die_latency_s: float
     include_materialized_endpoints: bool
+    # Nominal Stage 2 anchors; dedicated YAML may override both explicitly.
+    h2h_energy_pj_per_bit: float = 0.30
+    gpu_direct_energy_pj_per_bit: float = 0.54
 
 
 @dataclass(frozen=True)
@@ -109,7 +113,7 @@ class PrefetchWorkloadConfig:
 class PrefetchSimulationConfig:
     mode: str
     architectures: tuple[ArchitectureConfig, ...]
-    capacity_memory: CapacityMemoryConfig
+    capacity_memory: CapacityMemoryConfig | tuple[CapacityMemoryConfig, ...]
     execution: PrefetchExecutionConfig
     prefetch: PrefetchPolicyConfig
     workload: PrefetchWorkloadConfig
@@ -251,6 +255,40 @@ def _load_architecture(raw: Any, index: int) -> ArchitectureConfig:
     )
 
 
+def _load_capacity_memory(raw: Any, path: str) -> CapacityMemoryConfig:
+    capacity_raw = _mapping(raw, path)
+    device_raw = _mapping(
+        _required(capacity_raw, "device", path),
+        f"{path}.device",
+    )
+    return CapacityMemoryConfig(
+        device=CapacityMemoryDeviceConfig(
+            capacity_bytes=_positive_float(
+                _required(device_raw, "capacity_bytes", f"{path}.device"),
+                f"{path}.device.capacity_bytes",
+            ),
+            read_bw_bps=_positive_float(
+                _required(device_raw, "read_bw_bps", f"{path}.device"),
+                f"{path}.device.read_bw_bps",
+            ),
+            read_latency_s=_nonnegative_float(
+                _required(device_raw, "read_latency_s", f"{path}.device"),
+                f"{path}.device.read_latency_s",
+            ),
+            read_energy_pj_per_bit=_positive_float(
+                _required(device_raw, "read_energy_pj_per_bit", f"{path}.device"),
+                f"{path}.device.read_energy_pj_per_bit",
+            ),
+        ),
+        link=_load_link(
+            _required(capacity_raw, "link", path),
+            f"{path}.link",
+            allow_distance=True,
+        ),
+        name=str(capacity_raw.get("name", "scenario")),
+    )
+
+
 def load_prefetch_config(path: str | Path) -> PrefetchSimulationConfig:
     """Load the standalone eight-lane layer-prefetch experiment schema."""
     with Path(path).open("r", encoding="utf-8") as stream:
@@ -271,42 +309,16 @@ def load_prefetch_config(path: str | Path) -> PrefetchSimulationConfig:
     if len(set(kinds)) != len(kinds):
         raise PrefetchConfigError("architecture kinds must be unique")
 
-    capacity_raw = _mapping(
-        _required(root, "capacity_memory", "configuration"), "capacity_memory"
-    )
-    device_raw = _mapping(
-        _required(capacity_raw, "device", "capacity_memory"),
-        "capacity_memory.device",
-    )
-    capacity_memory = CapacityMemoryConfig(
-        device=CapacityMemoryDeviceConfig(
-            capacity_bytes=_positive_float(
-                _required(device_raw, "capacity_bytes", "capacity_memory.device"),
-                "capacity_memory.device.capacity_bytes",
-            ),
-            read_bw_bps=_positive_float(
-                _required(device_raw, "read_bw_bps", "capacity_memory.device"),
-                "capacity_memory.device.read_bw_bps",
-            ),
-            read_latency_s=_nonnegative_float(
-                _required(device_raw, "read_latency_s", "capacity_memory.device"),
-                "capacity_memory.device.read_latency_s",
-            ),
-            read_energy_pj_per_bit=_positive_float(
-                _required(
-                    device_raw,
-                    "read_energy_pj_per_bit",
-                    "capacity_memory.device",
-                ),
-                "capacity_memory.device.read_energy_pj_per_bit",
-            ),
-        ),
-        link=_load_link(
-            _required(capacity_raw, "link", "capacity_memory"),
-            "capacity_memory.link",
-            allow_distance=True,
-        ),
-    )
+    capacity_input = _required(root, "capacity_memory", "configuration")
+    if isinstance(capacity_input, list):
+        if not capacity_input:
+            raise PrefetchConfigError("capacity_memory must not be empty")
+        capacity_memory: CapacityMemoryConfig | tuple[CapacityMemoryConfig, ...] = tuple(
+            _load_capacity_memory(item, f"capacity_memory[{index}]")
+            for index, item in enumerate(capacity_input)
+        )
+    else:
+        capacity_memory = _load_capacity_memory(capacity_input, "capacity_memory")
 
     execution_raw = _mapping(
         _required(root, "execution", "configuration"), "execution"
@@ -354,6 +366,14 @@ def load_prefetch_config(path: str | Path) -> PrefetchSimulationConfig:
             "execution.base_die_latency_s",
         ),
         include_materialized_endpoints=include_endpoints,
+        h2h_energy_pj_per_bit=_positive_float(
+            execution_raw.get("h2h_energy_pj_per_bit", 0.30),
+            "execution.h2h_energy_pj_per_bit",
+        ),
+        gpu_direct_energy_pj_per_bit=_positive_float(
+            execution_raw.get("gpu_direct_energy_pj_per_bit", 0.54),
+            "execution.gpu_direct_energy_pj_per_bit",
+        ),
     )
 
     prefetch_raw = _mapping(
@@ -432,10 +452,14 @@ def load_prefetch_config(path: str | Path) -> PrefetchSimulationConfig:
     weight_backing_per_lane = (
         b_weight_footprint(MODELS[workload.model], workload.tp) / LANE_COUNT
     )
-    if capacity_memory.device.capacity_bytes < weight_backing_per_lane:
-        raise PrefetchConfigError(
-            "capacity_memory device is too small for one-lane weight backing"
-        )
+    capacity_profiles = (
+        capacity_memory if isinstance(capacity_memory, tuple) else (capacity_memory,)
+    )
+    for profile in capacity_profiles:
+        if profile.device.capacity_bytes < weight_backing_per_lane:
+            raise PrefetchConfigError(
+                "capacity_memory device is too small for one-lane weight backing"
+            )
 
     return PrefetchSimulationConfig(
         mode=mode,

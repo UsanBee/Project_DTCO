@@ -28,6 +28,7 @@ architectures:
       latency_s: 2.0e-8
       energy_pj_per_bit: 0.54
 capacity_memory:
+  name: uncalibrated_example
   device:
     capacity_bytes: 64e9
     read_bw_bps: 256e9
@@ -49,18 +50,20 @@ execution:
   gpu_direct_latency_s: 2.0e-8
   base_die_latency_s: 5.0e-9
   include_materialized_endpoints: true
+  h2h_energy_pj_per_bit: 0.30
+  gpu_direct_energy_pj_per_bit: 0.54
 prefetch:
-  weight_residency_policy: [persistent_if_fit, streaming]
-  weight_chunk_bytes: [1048576]
-  kv_chunk_bytes: [262144]
-  kv_writeback_chunk_bytes: [65536]
-  max_inflight_chunks_per_lane: [1, 4, null]
+  weight_residency_policy: [streaming]
+  weight_chunk_bytes: [1000000000000]
+  kv_chunk_bytes: [1000000000000]
+  kv_writeback_chunk_bytes: [1000000000000]
+  max_inflight_chunks_per_lane: [null]
 workload:
-  run_mode: [prefill_only, decode_only, prefill_decode]
-  start_state: [cold_start, steady_state]
-  model: Llama-70B
-  tp: 4
+  run_mode: [decode_only]
+  start_state: [cold_start]
+  model: Llama-7B
+  tp: 2
   pp: 1
-  seq_len: 4096
-  batch: [1, 8]
-  decode_tokens: [1, 8, 32]
+  seq_len: 64
+  batch: [1]
+  decode_tokens: [1]
