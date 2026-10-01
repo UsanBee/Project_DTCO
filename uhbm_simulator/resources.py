@@ -71,6 +71,7 @@ class ResourceLayer:
     local_hbm: dict[tuple[int, int], RateResource]
     side_hbm: dict[int, RateResource]
     h2h_link: dict[tuple[int, int], RateResource]
+    pillar_link: dict[tuple[int, int], RateResource]
     gpu_direct_link: dict[tuple[int, int], RateResource]
     gpu_compute: dict[int, RateResource]
 
@@ -80,6 +81,7 @@ class ResourceLayer:
             self.local_hbm,
             self.side_hbm,
             self.h2h_link,
+            self.pillar_link,
             self.gpu_direct_link,
             self.gpu_compute,
         ):
@@ -101,6 +103,7 @@ def build_resource_layer(
     local_hbm_stack_count: int,
     local_hbm_stack_bw_bps: float,
     local_hbm_stack_capacity_bytes: float,
+    local_hbm_latency_s: float = 0.0,
     side_hbm_bw_bps: float,
     side_hbm_latency_s: float,
     h2h_bw_bps: float,
@@ -108,8 +111,11 @@ def build_resource_layer(
     gpu_direct_bw_bps: float,
     gpu_direct_latency_s: float,
     gpu_compute_flops: float,
+    physical_adjacency: tuple[tuple[int, ...], ...] | None = None,
+    pillar_link_bw_bps: float | None = None,
+    pillar_link_latency_s: float = 0.0,
 ) -> ResourceLayer:
-    """Create the five resource groups from spec chapter 8."""
+    """Create Stage 2 resources plus optional directed D-3 pillar links."""
     if tp < 1:
         raise ValueError("tp must be positive")
     if local_hbm_stack_count < 1:
@@ -123,6 +129,7 @@ def build_resource_layer(
             f"local_hbm[{tile}][{stack}]",
             local_hbm_stack_bw_bps,
             storage_capacity=local_hbm_stack_capacity_bytes,
+            latency_s=local_hbm_latency_s,
         )
         for tile in range(tp)
         for stack in range(local_hbm_stack_count)
@@ -151,6 +158,26 @@ def build_resource_layer(
         )
         for edge in edges
     }
+    pillar_edges = (
+        {
+            (owner, requester)
+            for requester, owners in enumerate(physical_adjacency)
+            for owner in owners
+        }
+        if physical_adjacency is not None
+        else set()
+    )
+    if pillar_edges and pillar_link_bw_bps is None:
+        raise ValueError("pillar_link_bw_bps is required with physical_adjacency")
+    pillar_link = {
+        edge: RateResource(
+            env,
+            f"pillar_link[{edge[0]},{edge[1]}]",
+            pillar_link_bw_bps,
+            latency_s=pillar_link_latency_s,
+        )
+        for edge in pillar_edges
+    }
     gpu_direct_link = (
         {
             edge: RateResource(
@@ -168,6 +195,7 @@ def build_resource_layer(
         local_hbm=local_hbm,
         side_hbm=side_hbm,
         h2h_link=h2h_link,
+        pillar_link=pillar_link,
         gpu_direct_link=gpu_direct_link,
         gpu_compute=gpu_compute,
     )

@@ -2,8 +2,74 @@ from dataclasses import replace
 
 import pytest
 
+import uhbm_simulator.simulator as simulator_module
+from uhbm_simulator.config import load_config
 from uhbm_simulator.simulator import SimulationParameters, run_simulation
 from uhbm_simulator.workload import TrafficSignature
+
+
+def test_channel_energy_separates_transfer_link_and_stack_idle_terms():
+    def metric(amount):
+        return simulator_module.ResourceMetric(
+            request_count=1,
+            transferred_amount=amount,
+            total_queue_time_s=0.0,
+            total_service_time_s=0.0,
+            total_latency_time_s=0.0,
+            first_service_start_s=0.0,
+            utilization=0.0,
+        )
+
+    metrics = {
+        "local_hbm[0][0]": metric(10.0),
+        "side_hbm[0]": metric(20.0),
+        "h2h_link[0->1]": metric(30.0),
+        "gpu_direct_link[0->1]": metric(40.0),
+        "gpu_compute[0]": metric(50.0),
+    }
+    channels = load_config("configs/stage2_default.yaml").channels
+
+    energy = simulator_module.calculate_channel_energy(
+        metrics,
+        channels,
+        lane_rate_gbps=12.0,
+        local_hbm_stack_count=4,
+        elapsed_s=2.0,
+        tp=4,
+    )
+    per_gpu_scope_energy = simulator_module.calculate_channel_energy(
+        metrics,
+        channels,
+        lane_rate_gbps=12.0,
+        local_hbm_stack_count=4,
+        elapsed_s=2.0,
+        tp=1,
+    )
+
+    assert energy.local_hbm_energy_j == pytest.approx(3.464e-10)
+    # Per-GPU idle energy is 4 stacks * 0.4 W * 2 s = 3.2 J. The channel
+    # accounting is system-wide, so TP=4 must contribute exactly 4 * 3.2 J.
+    assert energy.local_hbm_idle_energy_j == pytest.approx(12.8)
+    assert energy.local_hbm_idle_energy_j == pytest.approx(
+        4.0 * per_gpu_scope_energy.local_hbm_idle_energy_j
+    )
+    assert energy.side_hbm_energy_j == pytest.approx(6.928e-10)
+    assert energy.side_hbm_link_energy_j == pytest.approx(1.6e-9)
+    assert energy.h2h_energy_j == pytest.approx(6.0e-11)
+    assert energy.gpu_direct_energy_j == pytest.approx(1.728e-10)
+    assert energy.total_energy_j - energy.local_hbm_idle_energy_j == pytest.approx(
+        2.872e-9, rel=0.0, abs=2e-15
+    )
+    assert energy.total_energy_j == pytest.approx(
+        energy.local_hbm_energy_j
+        + energy.local_hbm_idle_energy_j
+        + energy.side_hbm_energy_j
+        + energy.side_hbm_link_energy_j
+        + energy.h2h_energy_j
+        + energy.gpu_direct_energy_j,
+        rel=0.0,
+        abs=1e-15,
+    )
 
 
 def parameters(**overrides):
@@ -64,6 +130,7 @@ def test_materialized_uses_source_read_destination_write_and_reread():
     assert local_amount == 600.0  # two tiles x (source read + write + reread)
     assert h2h_amount == 200.0
     assert direct_amount == 0.0
+    assert result.elapsed_s == pytest.approx(4.0)
     assert result.tpot_s == pytest.approx(4.0)
 
 
@@ -110,7 +177,7 @@ def test_base_die_latency_occurs_after_h2h_transfer():
 
 
 def test_materialized_destination_buffer_counts_toward_hbm_capacity():
-    buffered = signature(b_local_bytes=60.0, b_remote_bytes=50.0)
+    buffered = signature(b_local_bytes=60.0, b_remote_bytes=100.0)
 
     with pytest.raises(ValueError, match="materialized"):
         run_simulation(buffered, parameters(local_hbm_stack_capacity_bytes=100.0))

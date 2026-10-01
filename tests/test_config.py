@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+import uhbm_simulator.config as config_module
 from uhbm_simulator.config import (
     DEFAULT_GPU_DIRECT_BW_BPS,
     DEFAULT_GPU_DIRECT_LATENCY_S,
@@ -59,6 +60,7 @@ def test_loads_spec_yaml_and_resolves_documented_placeholders(tmp_path):
     config = load_config(write_config(tmp_path))
 
     assert config.baseline == "B2-hybrid"
+    assert config.side_hbm_path_values == ("shared_h2h",)
     assert config.comm_mode == "materialized"
     assert config.r_values == (0.0, 0.25, 0.5, 0.75, 1.0)
     assert config.workload.phase == "decode"
@@ -71,6 +73,115 @@ def test_loads_spec_yaml_and_resolves_documented_placeholders(tmp_path):
     assert config.channels.h2h.n_pillar == (4, 8, 16, 32)
     assert config.channels.gpu_direct.bw_bps == DEFAULT_GPU_DIRECT_BW_BPS
     assert config.channels.gpu_direct.latency_s == DEFAULT_GPU_DIRECT_LATENCY_S
+
+
+def test_side_hbm_path_accepts_a_research_sweep_and_rejects_unknown_values(tmp_path):
+    swept = CONFIG_TEXT.replace(
+        "baseline: B2-hybrid",
+        "baseline: B2-hybrid\nside_hbm_path: [shared_h2h, independent]",
+    )
+    assert load_config(write_config(tmp_path, swept)).side_hbm_path_values == (
+        "shared_h2h",
+        "independent",
+    )
+
+    invalid = CONFIG_TEXT.replace(
+        "baseline: B2-hybrid",
+        "baseline: B2-hybrid\nside_hbm_path: average_hops",
+    )
+    with pytest.raises(ConfigError, match="side_hbm_path"):
+        load_config(write_config(tmp_path, invalid))
+
+
+def test_energy_defaults_and_ucie_rate_mapping_are_loaded(tmp_path):
+    config = load_config(write_config(tmp_path))
+
+    assert config.channels.local_hbm.stack.energy_pj_per_bit == 4.33
+    assert config.channels.local_hbm.stack.hbm_idle_power_w == 0.4
+    assert config.channels.side_hbm.energy_pj_per_bit == 4.33
+    assert config.channels.side_hbm.link_energy_pj_per_bit == 10.0
+    assert config.channels.gpu_direct.energy_pj_per_bit == 0.54
+    assert config_module.h2h_energy_pj_per_bit(12.0) == 0.25
+    assert config_module.h2h_energy_pj_per_bit(16.0) == 0.30
+    assert config_module.h2h_energy_pj_per_bit(24.0) == 0.30
+    assert config_module.h2h_energy_pj_per_bit(32.0) == 0.30
+
+
+def test_explicit_hbm_idle_and_side_link_energy_values_are_loaded(tmp_path):
+    explicit = CONFIG_TEXT.replace(
+        "capacity_bytes: 16e9",
+        "capacity_bytes: 16e9\n      hbm_idle_power_w: 2.0",
+    ).replace(
+        "latency_s: 50e-9",
+        "latency_s: 50e-9\n    link_energy_pj_per_bit: 20.0",
+    )
+
+    config = load_config(write_config(tmp_path, explicit))
+
+    assert config.channels.local_hbm.stack.hbm_idle_power_w == 2.0
+    assert config.channels.side_hbm.link_energy_pj_per_bit == 20.0
+
+
+def test_scalar_batch_is_normalized_to_singleton_sweep(tmp_path):
+    config = load_config(write_config(tmp_path))
+
+    assert config.workload.batch_values == (1,)
+
+
+def test_batch_list_is_preserved_as_sweep_values(tmp_path):
+    config = load_config(
+        write_config(tmp_path, CONFIG_TEXT.replace("batch: 1", "batch: [1, 4, 8]"))
+    )
+
+    assert config.workload.batch_values == (1, 4, 8)
+
+
+@pytest.mark.parametrize("batch", ["[]", "0", "[1, 0]", "[1, 1.5]", "[true]"])
+def test_rejects_empty_nonpositive_or_noninteger_batch_sweep(tmp_path, batch):
+    invalid = CONFIG_TEXT.replace("batch: 1", f"batch: {batch}")
+
+    with pytest.raises(ConfigError, match="batch"):
+        load_config(write_config(tmp_path, invalid))
+
+
+@pytest.mark.parametrize(
+    "invalid_config",
+    [
+        CONFIG_TEXT.replace(
+            "capacity_bytes: 16e9", "capacity_bytes: 16e9\n      energy_pj_per_bit: -1"
+        ),
+        CONFIG_TEXT.replace(
+            "latency_s: 50e-9", "latency_s: 50e-9\n    energy_pj_per_bit: .nan"
+        ),
+        CONFIG_TEXT.replace(
+            "latency_s: TBD", "latency_s: TBD\n    energy_pj_per_bit: 0"
+        ),
+    ],
+)
+def test_rejects_nonpositive_or_nonfinite_channel_energy(tmp_path, invalid_config):
+    with pytest.raises(ConfigError, match="energy"):
+        load_config(write_config(tmp_path, invalid_config))
+
+
+@pytest.mark.parametrize("invalid_value", ["0", "-0.1", ".nan", ".inf", "true"])
+@pytest.mark.parametrize(
+    ("anchor", "field"),
+    [
+        ("capacity_bytes: 16e9", "hbm_idle_power_w"),
+        ("latency_s: 50e-9", "link_energy_pj_per_bit"),
+    ],
+)
+def test_rejects_invalid_hbm_background_or_side_link_energy(
+    tmp_path, anchor, field, invalid_value
+):
+    invalid = CONFIG_TEXT.replace(
+        anchor,
+        f"{anchor}\n{'      ' if field == 'hbm_idle_power_w' else '    '}"
+        f"{field}: {invalid_value}",
+    )
+
+    with pytest.raises(ConfigError, match=field):
+        load_config(write_config(tmp_path, invalid))
 
 
 def test_h2h_bandwidth_strictly_decreases_as_n_pillar_increases():

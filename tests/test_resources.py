@@ -72,3 +72,48 @@ def test_resource_layer_creates_ring_direct_links_only_when_r_is_positive():
     )
 
     assert set(resources.gpu_direct_link) == {(0, 1), (1, 0)}
+
+
+def test_resource_layer_defaults_local_hbm_latency_to_zero():
+    env = simpy.Environment()
+    resources = build_resource_layer(
+        env=env,
+        tp=2,
+        r=0.0,
+        local_hbm_stack_count=2,
+        local_hbm_stack_bw_bps=1.2e12,
+        local_hbm_stack_capacity_bytes=16e9,
+        side_hbm_bw_bps=4.8e12,
+        side_hbm_latency_s=50e-9,
+        h2h_bw_bps=900e9,
+        h2h_latency_s=20e-9,
+        gpu_direct_bw_bps=900e9,
+        gpu_direct_latency_s=20e-9,
+        gpu_compute_flops=1e15,
+    )
+
+    assert all(resource.latency_s == 0.0 for resource in resources.local_hbm.values())
+
+
+def test_resource_layer_applies_nonzero_latency_to_every_local_hbm_stack():
+    env = simpy.Environment()
+    resources = build_resource_layer(
+        env=env,
+        tp=2,
+        r=0.0,
+        local_hbm_stack_count=2,
+        local_hbm_stack_bw_bps=1.2e12,
+        local_hbm_stack_capacity_bytes=16e9,
+        local_hbm_latency_s=37e-9,
+        side_hbm_bw_bps=4.8e12,
+        side_hbm_latency_s=50e-9,
+        h2h_bw_bps=900e9,
+        h2h_latency_s=20e-9,
+        gpu_direct_bw_bps=900e9,
+        gpu_direct_latency_s=20e-9,
+        gpu_compute_flops=1e15,
+    )
+
+    assert all(
+        resource.latency_s == 37e-9 for resource in resources.local_hbm.values()
+    )

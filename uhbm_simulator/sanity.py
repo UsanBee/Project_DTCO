@@ -113,9 +113,16 @@ def run_sanity_checks() -> SanityReport:
     ]
     h2h_amounts = [_total_amount(result, "h2h_link") for result in r_results]
 
+    built_stage1_signature = build_decode_signature(
+        "Llama-70B", tp=4, seq_len=4096
+    )
     stage1_signature = replace(
-        build_decode_signature("Llama-70B", tp=4, seq_len=4096),
+        built_stage1_signature,
         compute_flops=0.0,
+        semantic_stages=tuple(
+            replace(stage, compute_flops=0.0)
+            for stage in built_stage1_signature.semantic_stages or ()
+        ),
     )
     r_one = run_simulation(
         stage1_signature,

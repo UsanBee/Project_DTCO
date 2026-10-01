@@ -1,12 +1,15 @@
 baseline: B2-hybrid
 comm_mode: materialized
 thermal_scenario: no_throttling
+side_hbm_path: shared_h2h
 r: [0, 0.25, 0.5, 0.75, 1.0]
 channels:
   local_hbm:
     stack:
       bw_bps: 1.2e12
       capacity_bytes: 16e9
+      energy_pj_per_bit: 4.33
+      hbm_idle_power_w: 0.4
     count: [1, 2, 4]
     max_count: 4
     address_mapping:
@@ -15,6 +18,8 @@ channels:
   side_hbm:
     bw_bps: 4.8e12
     latency_s: 50e-9
+    energy_pj_per_bit: 4.33
+    link_energy_pj_per_bit: 10.0
   h2h:
     lane_rate_gbps: [12, 24, 32]
     latency_s: 20e-9
@@ -23,6 +28,7 @@ channels:
   gpu_direct:
     bw_bps: TBD
     latency_s: TBD
+    energy_pj_per_bit: 0.54
 workload:
   model: Llama-7B
   tp: 4

@@ -9,7 +9,15 @@ import json
 from pathlib import Path
 from typing import Iterable, Sequence
 
-from uhbm_simulator.config import AddressMappingConfig, SimulationConfig, load_config
+from uhbm_simulator.config import (
+    ARUNKUMAR2019_ON_BOARD_LINK_ENERGY_PJ_PER_BIT,
+    ARUNKUMAR2019_ON_PACKAGE_LINK_ENERGY_PJ_PER_BIT,
+    CROSS_METHODOLOGY_HIGH_REFERENCE_IDLE_POWER_W,
+    DEFAULT_HBM_IDLE_POWER_W_PER_STACK,
+    AddressMappingConfig,
+    SimulationConfig,
+    load_config,
+)
 from uhbm_simulator.sweep import SweepRow, run_sweep
 
 
@@ -22,6 +30,10 @@ AXES = (
     "address_mapping.policy",
     "h2h.lane_rate_gbps",
     "h2h.n_pillar",
+    "batch",
+    "side_hbm.link_energy_pj_per_bit",
+    "local_hbm.stack.hbm_idle_power_w",
+    "side_hbm_path",
 )
 COMM_MODE_VALUES = ("materialized", "cut_through")
 THERMAL_SCENARIO_VALUES = (
@@ -31,6 +43,18 @@ THERMAL_SCENARIO_VALUES = (
 )
 ADDRESS_MAPPING_VALUES = ("uniform", "weighted")
 HOTSPOT_WEIGHTS = (0.7, 0.1, 0.1, 0.1)
+SIDE_HBM_LINK_ENERGY_VALUES = (
+    ARUNKUMAR2019_ON_PACKAGE_LINK_ENERGY_PJ_PER_BIT,
+    ARUNKUMAR2019_ON_BOARD_LINK_ENERGY_PJ_PER_BIT,
+    20.0,
+    40.0,
+)
+LOCAL_HBM_IDLE_POWER_VALUES = (
+    DEFAULT_HBM_IDLE_POWER_W_PER_STACK,
+    2.0,
+    # Normalize the cross-paper expression for stable human-facing CSV text.
+    round(CROSS_METHODOLOGY_HIGH_REFERENCE_IDLE_POWER_W, 1),
+)
 ARCHITECTURE_FEASIBILITY_SEMANTICS = (
     "native_r0_h2h_feasibility_independent_of_actual_r"
 )
@@ -38,6 +62,7 @@ ARCHITECTURE_APPLICABLE_AXES = {
     "local_hbm_count",
     "h2h.lane_rate_gbps",
     "h2h.n_pillar",
+    "batch",
 }
 
 
@@ -53,6 +78,12 @@ class SensitivityRow:
     communication_time_s_min: float | None
     communication_time_s_max: float | None
     communication_time_s_relative_range: float | None
+    energy_per_token_j_min: float | None
+    energy_per_token_j_max: float | None
+    energy_per_token_j_relative_range: float | None
+    decode_throughput_tokens_per_s_min: float | None
+    decode_throughput_tokens_per_s_max: float | None
+    decode_throughput_tokens_per_s_relative_range: float | None
     flips_capacity_feasible: bool
     flips_architecture_feasible: bool
     n_capacity_infeasible_points: int
@@ -73,6 +104,10 @@ def build_baseline_config(config: SimulationConfig) -> SimulationConfig:
     """Freeze the approved central Stage 2 sensitivity baseline."""
     local_hbm = replace(
         config.channels.local_hbm,
+        stack=replace(
+            config.channels.local_hbm.stack,
+            hbm_idle_power_w=DEFAULT_HBM_IDLE_POWER_W_PER_STACK,
+        ),
         count_values=(min(4, config.channels.local_hbm.max_count),),
         address_mapping=AddressMappingConfig(policy="uniform", weights=None),
     )
@@ -83,23 +118,49 @@ def build_baseline_config(config: SimulationConfig) -> SimulationConfig:
         ),
         n_pillar=(int(_nearest(config.channels.h2h.n_pillar, 8.0)),),
     )
-    return replace(
+    frozen = replace(
         config,
         comm_mode="materialized",
         thermal_scenario="no_throttling",
+        side_hbm_path_values=("shared_h2h",),
         r_values=(float(_nearest(config.r_values, 0.5)),),
-        channels=replace(config.channels, local_hbm=local_hbm, h2h=h2h),
+        channels=replace(
+            config.channels,
+            local_hbm=local_hbm,
+            side_hbm=replace(
+                config.channels.side_hbm,
+                link_energy_pj_per_bit=(
+                    ARUNKUMAR2019_ON_BOARD_LINK_ENERGY_PJ_PER_BIT
+                ),
+            ),
+            h2h=h2h,
+        ),
         workload=replace(
             config.workload,
             r_remote_values=(
                 float(_nearest(config.workload.r_remote_values, 0.1)),
             ),
+            batch_values=(config.workload.batch_values[len(config.workload.batch_values) // 2],),
         ),
     )
+    midpoint = len(config.workload.batch_values) // 2
+    candidates = sorted(
+        enumerate(config.workload.batch_values),
+        key=lambda item: (abs(item[0] - midpoint), item[0]),
+    )
+    for _, batch in candidates:
+        candidate = replace(
+            frozen,
+            workload=replace(frozen.workload, batch_values=(batch,)),
+        )
+        rows = run_sweep(candidate)
+        if len(rows) == 1 and rows[0].capacity_feasible:
+            return candidate
+    raise ValueError("sensitivity has no capacity-feasible batch baseline")
 
 
 def metric_range(
-    values: Iterable[float | None], baseline: float
+    values: Iterable[float | None], baseline: float | None
 ) -> tuple[float | None, float | None, float | None]:
     """Return min, max, and (max-min)/baseline over feasible values."""
     feasible_values = tuple(value for value in values if value is not None)
@@ -125,6 +186,10 @@ def _axis_values(
         "address_mapping.policy": ADDRESS_MAPPING_VALUES,
         "h2h.lane_rate_gbps": tuple(config.channels.h2h.lane_rate_gbps),
         "h2h.n_pillar": tuple(config.channels.h2h.n_pillar),
+        "batch": tuple(config.workload.batch_values),
+        "side_hbm.link_energy_pj_per_bit": SIDE_HBM_LINK_ENERGY_VALUES,
+        "local_hbm.stack.hbm_idle_power_w": LOCAL_HBM_IDLE_POWER_VALUES,
+        "side_hbm_path": tuple(config.side_hbm_path_values),
     }
 
 
@@ -198,6 +263,38 @@ def _point_config(
                 ),
             ),
         )
+    if axis == "batch":
+        return replace(
+            baseline,
+            workload=replace(baseline.workload, batch_values=(int(value),)),
+        )
+    if axis == "side_hbm.link_energy_pj_per_bit":
+        return replace(
+            baseline,
+            channels=replace(
+                baseline.channels,
+                side_hbm=replace(
+                    baseline.channels.side_hbm,
+                    link_energy_pj_per_bit=float(value),
+                ),
+            ),
+        )
+    if axis == "local_hbm.stack.hbm_idle_power_w":
+        return replace(
+            baseline,
+            channels=replace(
+                baseline.channels,
+                local_hbm=replace(
+                    baseline.channels.local_hbm,
+                    stack=replace(
+                        baseline.channels.local_hbm.stack,
+                        hbm_idle_power_w=float(value),
+                    ),
+                ),
+            ),
+        )
+    if axis == "side_hbm_path":
+        return replace(baseline, side_hbm_path_values=(str(value),))
     raise ValueError(f"unknown sensitivity axis: {axis}")
 
 
@@ -225,6 +322,14 @@ def _baseline_value(config: SimulationConfig, axis: str) -> float | int | str:
         return config.channels.h2h.lane_rate_gbps[0]
     if axis == "h2h.n_pillar":
         return config.channels.h2h.n_pillar[0]
+    if axis == "batch":
+        return config.workload.batch_values[0]
+    if axis == "side_hbm.link_energy_pj_per_bit":
+        return config.channels.side_hbm.link_energy_pj_per_bit
+    if axis == "local_hbm.stack.hbm_idle_power_w":
+        return config.channels.local_hbm.stack.hbm_idle_power_w
+    if axis == "side_hbm_path":
+        return config.side_hbm_path_values[0]
     raise ValueError(f"unknown sensitivity axis: {axis}")
 
 
@@ -248,6 +353,27 @@ def _axis_notes(axis: str) -> str:
         notes.append(
             "weighted uses an intentional worst-case hotspot profile "
             "[0.7, 0.1, 0.1, 0.1], not an average weighted distribution"
+        )
+    if axis == "side_hbm.link_energy_pj_per_bit":
+        notes.append(
+            "energy-only literature range: 0.54 pJ/bit on-package and "
+            "10/20/40 pJ/bit on-board sensitivity references, not measured "
+            "uHBM values; this term is intentionally zero under the "
+            "shared_h2h production baseline because traversed edge bytes are "
+            "charged to h2h_energy_j, and only affects independent mode"
+        )
+    if axis == "local_hbm.stack.hbm_idle_power_w":
+        notes.append(
+            "energy-only literature range: 0.4 W is a Stow Fig. 3(a) visual "
+            "read; 5.2 W is a cross-methodology high reference, not an upper "
+            "bound"
+        )
+    if axis == "side_hbm_path":
+        notes.append(
+            "research bounding axis: shared_h2h routes remote-read payloads "
+            "over H2H while independent preserves the legacy separate path; "
+            "architecture feasibility is inapplicable because the analytical "
+            "h2h_feasibility() model omits side traffic"
         )
     return "; ".join(notes)
 
@@ -286,6 +412,14 @@ def run_sensitivity(config: SimulationConfig) -> list[SensitivityRow]:
             (row.communication_time_s for row in point_rows),
             baseline_result.communication_time_s,
         )
+        energy_min, energy_max, energy_relative = metric_range(
+            (row.energy_per_token_j for row in point_rows),
+            baseline_result.energy_per_token_j,
+        )
+        throughput_min, throughput_max, throughput_relative = metric_range(
+            (row.decode_throughput_tokens_per_s for row in point_rows),
+            baseline_result.decode_throughput_tokens_per_s,
+        )
         capacity_states = [row.capacity_feasible for row in point_rows]
         n_infeasible = sum(not state for state in capacity_states)
         rows.append(
@@ -300,8 +434,20 @@ def run_sensitivity(config: SimulationConfig) -> list[SensitivityRow]:
                 communication_time_s_min=comm_min,
                 communication_time_s_max=comm_max,
                 communication_time_s_relative_range=comm_relative,
+                energy_per_token_j_min=energy_min,
+                energy_per_token_j_max=energy_max,
+                energy_per_token_j_relative_range=energy_relative,
+                decode_throughput_tokens_per_s_min=throughput_min,
+                decode_throughput_tokens_per_s_max=throughput_max,
+                decode_throughput_tokens_per_s_relative_range=(
+                    throughput_relative
+                ),
                 flips_capacity_feasible=_flips(capacity_states),
-                flips_architecture_feasible=_flips(architecture_states),
+                flips_architecture_feasible=(
+                    _flips(architecture_states)
+                    if axis in ARCHITECTURE_APPLICABLE_AXES
+                    else False
+                ),
                 n_capacity_infeasible_points=n_infeasible,
                 capacity_infeasible_fraction=n_infeasible / len(values),
                 architecture_feasibility_applicable=(

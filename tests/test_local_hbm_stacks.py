@@ -7,7 +7,7 @@ from uhbm_simulator.simulator import (
     SimulationParameters,
     run_simulation,
 )
-from uhbm_simulator.workload import TrafficSignature
+from uhbm_simulator.workload import TrafficSignature, build_prefill_signature
 
 
 def parameters(**overrides):
@@ -53,6 +53,21 @@ def local_metrics(result):
     }
 
 
+def test_simulation_parameters_default_local_hbm_latency_is_zero():
+    assert parameters().local_hbm_latency_s == 0.0
+
+
+def test_local_hbm_latency_increases_end_to_end_time_by_exactly_one_latency():
+    baseline = run_simulation(local_signature(), parameters(local_hbm_latency_s=0.0))
+    latency_s = 0.25
+    delayed = run_simulation(
+        local_signature(), parameters(local_hbm_latency_s=latency_s)
+    )
+
+    assert delayed.elapsed_s == baseline.elapsed_s + latency_s
+    assert delayed.tpot_s == baseline.tpot_s + latency_s
+
+
 def test_four_uniform_stacks_exactly_match_one_aggregate_resource():
     aggregate = run_simulation(
         local_signature(),
@@ -79,11 +94,17 @@ def test_more_uniform_stacks_reduce_max_per_stack_queueing():
             local_hbm_stack_count=1,
             local_hbm_stack_bw_bps=100.0,
             allow_overlap=True,
+            strict_collective_dependency=False,
         ),
     )
     four_stacks = run_simulation(
         signature,
-        parameters(tp=2, local_hbm_stack_bw_bps=100.0, allow_overlap=True),
+        parameters(
+            tp=2,
+            local_hbm_stack_bw_bps=100.0,
+            allow_overlap=True,
+            strict_collective_dependency=False,
+        ),
     )
 
     one_stack_max_queue = max(
@@ -133,6 +154,74 @@ def test_weighted_policy_detects_single_stack_capacity_overflow():
 
     assert isinstance(error.value, ValueError)
     assert error.value.stack_index == 0
+
+
+def test_capacity_uses_resident_footprint_instead_of_local_transfer_traffic():
+    signature = TrafficSignature(
+        phase="decode",
+        b_local_bytes=100.0,
+        b_remote_bytes=0.0,
+        n_messages=0,
+        compute_flops=0.0,
+        local_footprint_bytes=40.0,
+    )
+
+    result = run_simulation(
+        signature,
+        parameters(
+            local_hbm_stack_count=1,
+            local_hbm_stack_bw_bps=100.0,
+            local_hbm_stack_capacity_bytes=40.0,
+        ),
+    )
+
+    assert result.tpot_s == 1.0
+
+
+def test_legacy_signature_without_footprint_falls_back_to_local_transfer_bytes():
+    with pytest.raises(LocalHBMCapacityError):
+        run_simulation(
+            local_signature(100.0),
+            parameters(
+                local_hbm_stack_count=1,
+                local_hbm_stack_bw_bps=100.0,
+                local_hbm_stack_capacity_bytes=40.0,
+            ),
+        )
+
+
+def test_prefill_activation_traffic_does_not_change_local_capacity_boundary():
+    without_activation_traffic = build_prefill_signature(
+        "Llama-70B", tp=1, seq_len=4096, batch=1, c_act_traffic=0.0
+    )
+    with_activation_traffic = build_prefill_signature(
+        "Llama-70B", tp=1, seq_len=4096, batch=1, c_act_traffic=4.0
+    )
+
+    assert with_activation_traffic.b_local_bytes > without_activation_traffic.b_local_bytes
+    assert (
+        with_activation_traffic.local_footprint_bytes
+        == without_activation_traffic.local_footprint_bytes
+        == 141_342_177_280.0
+    )
+
+    boundary_capacity_per_stack = 31_801_989_888.0
+    feasible_parameters = parameters(
+        r_remote=0.1,
+        local_hbm_stack_capacity_bytes=boundary_capacity_per_stack,
+    )
+    without_result = run_simulation(without_activation_traffic, feasible_parameters)
+    with_result = run_simulation(with_activation_traffic, feasible_parameters)
+
+    assert with_result.tpot_s > without_result.tpot_s
+
+    infeasible_parameters = parameters(
+        r_remote=0.1,
+        local_hbm_stack_capacity_bytes=boundary_capacity_per_stack - 1.0,
+    )
+    for signature in (without_activation_traffic, with_activation_traffic):
+        with pytest.raises(LocalHBMCapacityError):
+            run_simulation(signature, infeasible_parameters)
 
 
 @pytest.mark.parametrize(

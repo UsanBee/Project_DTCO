@@ -18,6 +18,7 @@ from uhbm_simulator.config import (
 from uhbm_simulator.simulator import (
     LocalHBMCapacityError,
     SimulationParameters,
+    calculate_channel_energy,
     run_simulation,
 )
 from uhbm_simulator.workload import build_decode_signature, build_prefill_signature
@@ -36,6 +37,12 @@ DEFAULT_BASE_DIE_LATENCY_S = 5e-9
 @dataclass(frozen=True)
 class SweepRow:
     baseline: str
+    side_hbm_path: str
+    side_hbm_owner_scope: str
+    pillar_operating_point: str | None
+    pillar_link_bw_bps: float | None
+    pillar_link_latency_s: float | None
+    pillar_link_energy_pj_per_bit: float | None
     comm_mode: str
     thermal_scenario: str
     phase: str
@@ -56,6 +63,7 @@ class SweepRow:
     h2h_bw_feasible: bool | None
     h2h_latency_feasible: bool | None
     architecture_feasible: bool | None
+    architecture_feasibility_applicable: bool
     capacity_feasible: bool
     ttft_s: float | None
     tpot_s: float | None
@@ -65,9 +73,24 @@ class SweepRow:
     local_hbm_utilization_max: float | None
     side_hbm_utilization: float | None
     h2h_utilization: float | None
+    pillar_link_utilization: float | None
     gpu_direct_utilization: float | None
     gpu_compute_utilization: float | None
     total_queue_time_s: float | None
+    collective_h2h_edge_bytes: float | None
+    side_hbm_read_h2h_edge_bytes: float | None
+    pillar_side_read_edge_bytes: float | None
+    local_hbm_energy_j: float | None
+    local_hbm_idle_energy_j: float | None
+    side_hbm_energy_j: float | None
+    side_hbm_link_energy_j: float | None
+    h2h_energy_j: float | None
+    pillar_link_energy_j: float | None
+    gpu_direct_energy_j: float | None
+    total_energy_j: float | None
+    decode_throughput_tokens_per_s: float | None
+    prefill_throughput_tokens_per_s: float | None
+    energy_per_token_j: float | None
 
 
 # TODO(태현): B0/B1/B2의 numerical parameter sets가 정해지면 baseline label을
@@ -92,7 +115,7 @@ def _max_utilization(metrics, prefix: str) -> float:
     return max(values, default=0.0)
 
 
-def _build_signature(config: SimulationConfig):
+def _build_signature(config: SimulationConfig, batch: int):
     workload = config.workload
     builder = (
         build_prefill_signature if workload.phase == "prefill" else build_decode_signature
@@ -101,23 +124,47 @@ def _build_signature(config: SimulationConfig):
         workload.model,
         tp=workload.tp,
         seq_len=workload.seq_len,
-        batch=workload.batch,
+        batch=batch,
     )
 
 
 def run_sweep(config: SimulationConfig) -> list[SweepRow]:
     """Expand every YAML sweep axis and simulate each design point."""
-    signature = _build_signature(config)
     workload = config.workload
     channels = config.channels
     rows = []
-    for r, r_remote, local_hbm_count, lane_rate, n_pillar in product(
+    route_points = []
+    for side_hbm_path in config.side_hbm_path_values:
+        for owner_scope in config.side_hbm_owner_scope_values:
+            if side_hbm_path == "pillar_bypass":
+                pillar = channels.pillar_link
+                if pillar is None:
+                    raise ValueError("pillar_bypass requires pillar_link config")
+                route_points.extend(
+                    (side_hbm_path, owner_scope, point)
+                    for point in pillar.operating_points
+                )
+            else:
+                route_points.append((side_hbm_path, owner_scope, None))
+    for (
+        r,
+        r_remote,
+        batch,
+        local_hbm_count,
+        lane_rate,
+        n_pillar,
+        route_point,
+    ) in product(
         config.r_values,
         workload.r_remote_values,
+        workload.batch_values,
         channels.local_hbm.count_values,
         channels.h2h.lane_rate_gbps,
         channels.h2h.n_pillar,
+        route_points,
     ):
+        side_hbm_path, owner_scope, pillar_point = route_point
+        signature = _build_signature(config, batch)
         h2h_bw = h2h_bandwidth_bps(
             lane_rate,
             n_pillar,
@@ -149,6 +196,20 @@ def run_sweep(config: SimulationConfig) -> list[SweepRow]:
             gpu_direct_latency_s=channels.gpu_direct.latency_s,
             gpu_peak_flops=DEFAULT_GPU_PEAK_FLOPS,
             base_die_latency_s=DEFAULT_BASE_DIE_LATENCY_S,
+            side_hbm_path=side_hbm_path,
+            side_hbm_owner_scope=owner_scope,
+            physical_adjacency=(
+                config.physical_adjacency_by_tp[workload.tp]
+                if owner_scope == "adjacent"
+                and config.physical_adjacency_by_tp is not None
+                else None
+            ),
+            pillar_link_bw_bps=(
+                pillar_point.bw_bps if pillar_point is not None else None
+            ),
+            pillar_link_latency_s=(
+                pillar_point.latency_s if pillar_point is not None else None
+            ),
         )
         feasibility = (
             h2h_feasibility(
@@ -160,9 +221,9 @@ def run_sweep(config: SimulationConfig) -> list[SweepRow]:
                     * local_hbm_count
                     / BW_LOCAL_0
                 ),
-                batch=workload.batch,
+                batch=batch,
                 actual_bw_bps=h2h_bw,
-                actual_latency_s=(
+                actual_h2h_round_latency_s=(
                     channels.h2h.latency_s + DEFAULT_BASE_DIE_LATENCY_S
                 ),
                 signature=signature,
@@ -175,9 +236,43 @@ def run_sweep(config: SimulationConfig) -> list[SweepRow]:
         except LocalHBMCapacityError:
             result = None
         metrics = result.resource_metrics if result is not None else None
+        energy = (
+            calculate_channel_energy(
+                metrics,
+                channels,
+                lane_rate,
+                local_hbm_stack_count=local_hbm_count,
+                elapsed_s=result.elapsed_s,
+                tp=workload.tp,
+                side_hbm_path=side_hbm_path,
+                pillar_link_energy_pj_per_bit=(
+                    pillar_point.energy_pj_per_bit
+                    if pillar_point is not None
+                    else None
+                ),
+            )
+            if metrics is not None
+            else None
+        )
         rows.append(
             SweepRow(
                 baseline=config.baseline,
+                side_hbm_path=side_hbm_path,
+                side_hbm_owner_scope=owner_scope,
+                pillar_operating_point=(
+                    pillar_point.name if pillar_point is not None else None
+                ),
+                pillar_link_bw_bps=(
+                    pillar_point.bw_bps if pillar_point is not None else None
+                ),
+                pillar_link_latency_s=(
+                    pillar_point.latency_s if pillar_point is not None else None
+                ),
+                pillar_link_energy_pj_per_bit=(
+                    pillar_point.energy_pj_per_bit
+                    if pillar_point is not None
+                    else None
+                ),
                 comm_mode=config.comm_mode,
                 thermal_scenario=config.thermal_scenario,
                 phase=workload.phase,
@@ -185,7 +280,7 @@ def run_sweep(config: SimulationConfig) -> list[SweepRow]:
                 tp=workload.tp,
                 pp=workload.pp,
                 seq_len=workload.seq_len,
-                batch=workload.batch,
+                batch=batch,
                 r=r,
                 r_remote=r_remote,
                 local_hbm_count=local_hbm_count,
@@ -207,6 +302,9 @@ def run_sweep(config: SimulationConfig) -> list[SweepRow]:
                 ),
                 architecture_feasible=(
                     feasibility.architecture_feasible if feasibility else None
+                ),
+                architecture_feasibility_applicable=(
+                    side_hbm_path == "independent"
                 ),
                 capacity_feasible=result is not None,
                 ttft_s=result.ttft_s if result is not None else None,
@@ -235,6 +333,11 @@ def run_sweep(config: SimulationConfig) -> list[SweepRow]:
                     if metrics is not None
                     else None
                 ),
+                pillar_link_utilization=(
+                    _average_utilization(metrics, "pillar_link")
+                    if metrics is not None
+                    else None
+                ),
                 gpu_direct_utilization=(
                     _average_utilization(metrics, "gpu_direct_link")
                     if metrics is not None
@@ -248,6 +351,61 @@ def run_sweep(config: SimulationConfig) -> list[SweepRow]:
                 total_queue_time_s=(
                     sum(metric.total_queue_time_s for metric in metrics.values())
                     if metrics is not None
+                    else None
+                ),
+                collective_h2h_edge_bytes=(
+                    result.collective_h2h_edge_bytes
+                    if result is not None
+                    else None
+                ),
+                side_hbm_read_h2h_edge_bytes=(
+                    result.side_hbm_read_h2h_edge_bytes
+                    if result is not None
+                    else None
+                ),
+                pillar_side_read_edge_bytes=(
+                    result.pillar_side_read_edge_bytes
+                    if result is not None
+                    else None
+                ),
+                local_hbm_energy_j=(
+                    energy.local_hbm_energy_j if energy is not None else None
+                ),
+                local_hbm_idle_energy_j=(
+                    energy.local_hbm_idle_energy_j if energy is not None else None
+                ),
+                side_hbm_energy_j=(
+                    energy.side_hbm_energy_j if energy is not None else None
+                ),
+                side_hbm_link_energy_j=(
+                    energy.side_hbm_link_energy_j if energy is not None else None
+                ),
+                h2h_energy_j=(energy.h2h_energy_j if energy is not None else None),
+                pillar_link_energy_j=(
+                    energy.pillar_link_energy_j if energy is not None else None
+                ),
+                gpu_direct_energy_j=(
+                    energy.gpu_direct_energy_j if energy is not None else None
+                ),
+                total_energy_j=(energy.total_energy_j if energy is not None else None),
+                decode_throughput_tokens_per_s=(
+                    batch / result.tpot_s
+                    if result is not None and workload.phase == "decode"
+                    else None
+                ),
+                prefill_throughput_tokens_per_s=(
+                    batch * workload.seq_len / result.ttft_s
+                    if result is not None and workload.phase == "prefill"
+                    else None
+                ),
+                energy_per_token_j=(
+                    energy.total_energy_j
+                    / (
+                        batch
+                        if workload.phase == "decode"
+                        else batch * workload.seq_len
+                    )
+                    if energy is not None
                     else None
                 ),
             )

@@ -1,12 +1,17 @@
 baseline: B2-hybrid
 comm_mode: materialized
 thermal_scenario: no_throttling
+side_hbm_path: shared_h2h
 r: [0, 0.25, 0.5, 0.75, 1.0]
 channels:
   local_hbm:
     stack:
       bw_bps: 1.2e12
       capacity_bytes: 16e9
+      energy_pj_per_bit: 4.33
+      # Literature-based nominal anchor, not a measured uHBM value. Stow et
+      # al. (IEEE CAL 2019) Fig. 3(a), 4-Hi HBM2 Idle-state chart read.
+      hbm_idle_power_w: 0.4
     count: [4]
     max_count: 4
     address_mapping:
@@ -15,6 +20,11 @@ channels:
   side_hbm:
     bw_bps: 4.8e12
     latency_s: 50e-9
+    # HBM datapath dynamic energy.
+    energy_pj_per_bit: 4.33
+    # Nominal on-board crossing anchor (Arunkumar et al., HPCA 2019), not a
+    # measured uHBM value; sensitivity.py also evaluates 0.54/20/40 pJ/bit.
+    link_energy_pj_per_bit: 10.0
   h2h:
     # UCIe 1.0/1.1 Advanced Package 공식 data rate <-> bump pitch 페어링으로 교체.
     # 12 GT/s@25um, 24 GT/s@36um, 32 GT/s@45um (Chiu et al., "High-performance,
@@ -39,10 +49,13 @@ channels:
     # 나오려면 ~1.6GHz 클럭을 가정해야 하므로 자릿수는 맞으나 확정값은 아님.
     bw_bps: TBD
     latency_s: TBD
+    energy_pj_per_bit: 0.54
 workload:
   model: Llama-70B
   tp: 4
   pp: 1
   seq_len: 4096
-  batch: 1
+  batch: [1, 4, 8, 16, 32]
+  # Placement fraction of b_local resident in side HBM; accesses follow that
+  # placement. side_hbm is capacity-unconstrained in the current Stage 2 model.
   r_remote: [0, 0.1, 0.25, 0.5]

@@ -1,0 +1,85 @@
+# D-3-only configuration. These operating points are literature-informed
+# placeholders for sensitivity analysis, not measured uHBM pillar-link values;
+# Stage 3 HFSS/ADS calibration must replace them.
+baseline: B2-hybrid
+comm_mode: materialized
+thermal_scenario: no_throttling
+side_hbm_path: pillar_bypass
+side_hbm_owner_scope: adjacent
+r: [0]
+channels:
+  local_hbm:
+    stack:
+      bw_bps: 1.2e12
+      capacity_bytes: 16e9
+      energy_pj_per_bit: 4.33
+      hbm_idle_power_w: 0.4
+    count: [4]
+    max_count: 4
+    address_mapping:
+      policy: uniform
+      weights: null
+  side_hbm:
+    bw_bps: 4.8e12
+    latency_s: 50e-9
+    energy_pj_per_bit: 4.33
+    link_energy_pj_per_bit: 10.0
+  h2h:
+    lane_rate_gbps: [24]
+    latency_s: 20e-9
+    n_pillar: [8]
+    n_pillar_max: 64
+  gpu_direct:
+    bw_bps: 768e9
+    latency_s: 20e-9
+    energy_pj_per_bit: 0.54
+  pillar_link:
+    # Paired points: do not expand these three dimensions as a Cartesian product.
+    operating_points:
+      - name: conservative
+        bw_bps: 84e9
+        latency_s: 50e-9
+        energy_pj_per_bit: 1.0
+      - name: nominal
+        bw_bps: 336e9
+        latency_s: 20e-9
+        energy_pj_per_bit: 0.54
+      - name: aggressive
+        bw_bps: 672e9
+        latency_s: 5e-9
+        energy_pj_per_bit: 0.30
+# Explicit package-layout hypotheses. No adjacent-ring topology is inferred.
+# Ownership topology is separate from the pillar transport parameters so the
+# same adjacency can be used by shared_h2h and independent controls.
+physical_adjacency:
+  2:
+    0: [1]
+    1: [0]
+  4:
+    0: [1, 2]
+    1: [0, 3]
+    2: [0, 3]
+    3: [1, 2]
+  8:
+    0: [1, 4]
+    1: [0, 2, 5]
+    2: [1, 3, 6]
+    3: [2, 7]
+    4: [0, 5]
+    5: [1, 4, 6]
+    6: [2, 5, 7]
+    7: [3, 6]
+workload:
+  model: Llama-70B
+  tp: 4
+  pp: 1
+  seq_len: 4096
+  batch: [1]
+  r_remote: [0]
+
+d3_analysis:
+  phase: decode
+  capacity_multipliers: [0.02, 0.05, 0.08, 0.12, 0.16, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50]
+  tps: [2, 4, 8]
+  seq_lens: [512, 4096, 16384]
+  batches: [1, 4, 8, 16, 32]

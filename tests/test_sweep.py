@@ -55,6 +55,7 @@ def test_sweep_expands_all_axes_and_exports_stats_csv(tmp_path):
     assert {row.r for row in rows} == {0.0, 1.0}
     assert {row.n_pillar for row in rows} == {4, 32}
     assert {row.local_hbm_count for row in rows} == {4}
+    assert {row.side_hbm_path for row in rows} == {"shared_h2h"}
     low_pillar_bw = next(row.h2h_bw_bps for row in rows if row.n_pillar == 4)
     high_pillar_bw = next(row.h2h_bw_bps for row in rows if row.n_pillar == 32)
     assert low_pillar_bw > high_pillar_bw
@@ -79,6 +80,31 @@ def test_sweep_expands_all_axes_and_exports_stats_csv(tmp_path):
     assert "local_hbm_count" in written[0]
     assert "local_hbm_utilization_max" in written[0]
     assert "architecture_feasible" in written[0]
+    assert "architecture_feasibility_applicable" in written[0]
+    assert "collective_h2h_edge_bytes" in written[0]
+    assert "side_hbm_read_h2h_edge_bytes" in written[0]
+    assert "total_energy_j" in written[0]
+    assert "local_hbm_idle_energy_j" in written[0]
+    assert "side_hbm_link_energy_j" in written[0]
+    assert "decode_throughput_tokens_per_s" in written[0]
+    assert "prefill_throughput_tokens_per_s" in written[0]
+    assert "energy_per_token_j" in written[0]
+
+    for row in rows:
+        assert row.local_hbm_energy_j is not None
+        assert row.local_hbm_idle_energy_j is not None
+        assert row.side_hbm_energy_j is not None
+        assert row.side_hbm_link_energy_j is not None
+        assert row.h2h_energy_j is not None
+        assert row.gpu_direct_energy_j is not None
+        assert row.total_energy_j == pytest.approx(
+            row.local_hbm_energy_j
+            + row.local_hbm_idle_energy_j
+            + row.side_hbm_energy_j
+            + row.side_hbm_link_energy_j
+            + row.h2h_energy_j
+            + row.gpu_direct_energy_j
+        )
 
 
 def test_sweep_expands_local_hbm_count_axis(tmp_path):
@@ -92,6 +118,65 @@ def test_sweep_expands_local_hbm_count_axis(tmp_path):
 
     assert len(rows) == 12
     assert {row.local_hbm_count for row in rows} == {1, 2, 4}
+
+
+def test_batch_is_cartesian_axis_and_decode_metrics_are_phase_aware(tmp_path):
+    config_path = tmp_path / "batch-sweep.yaml"
+    config_path.write_text(
+        SMALL_CONFIG.replace("r: [0, 1]", "r: [1]")
+        .replace("n_pillar: [4, 32]", "n_pillar: [4]")
+        .replace("batch: 1", "batch: [1, 2]"),
+        encoding="utf-8",
+    )
+
+    rows = run_sweep(load_config(config_path))
+
+    assert len(rows) == 2
+    assert {row.batch for row in rows} == {1, 2}
+    for row in rows:
+        assert row.decode_throughput_tokens_per_s == pytest.approx(
+            row.batch / row.tpot_s
+        )
+        assert row.prefill_throughput_tokens_per_s is None
+        assert row.energy_per_token_j == pytest.approx(
+            row.total_energy_j / row.batch
+        )
+    by_batch = {row.batch: row for row in rows}
+    assert (
+        by_batch[2].decode_throughput_tokens_per_s
+        > 1.8 * by_batch[1].decode_throughput_tokens_per_s
+    )
+
+
+def test_prefill_throughput_and_energy_per_token_use_prompt_token_count(tmp_path):
+    config_path = tmp_path / "prefill-batch.yaml"
+    config_path.write_text(
+        SMALL_CONFIG.replace("phase: decode", "phase: prefill")
+        .replace("r: [0, 1]", "r: [1]")
+        .replace("n_pillar: [4, 32]", "n_pillar: [4]")
+        .replace("seq_len: 128", "seq_len: 8")
+        .replace("batch: 1", "batch: [2]"),
+        encoding="utf-8",
+    )
+
+    row = run_sweep(load_config(config_path))[0]
+
+    assert row.decode_throughput_tokens_per_s is None
+    assert row.prefill_throughput_tokens_per_s == pytest.approx(16 / row.ttft_s)
+    assert row.energy_per_token_j == pytest.approx(row.total_energy_j / 16)
+
+
+def test_scalar_batch_one_matches_singleton_batch_list_exactly(tmp_path):
+    scalar_path = tmp_path / "scalar.yaml"
+    list_path = tmp_path / "list.yaml"
+    scalar_path.write_text(SMALL_CONFIG, encoding="utf-8")
+    list_path.write_text(SMALL_CONFIG.replace("batch: 1", "batch: [1]"), encoding="utf-8")
+
+    scalar_rows = run_sweep(load_config(scalar_path))
+    list_rows = run_sweep(load_config(list_path))
+
+    assert [row.ttft_s for row in scalar_rows] == [row.ttft_s for row in list_rows]
+    assert [row.tpot_s for row in scalar_rows] == [row.tpot_s for row in list_rows]
 
 
 def test_prefill_feasibility_uses_prefill_not_decode_signature(tmp_path):
@@ -186,6 +271,16 @@ def test_capacity_overflow_is_recorded_without_aborting_sweep(tmp_path):
     assert infeasible.gpu_direct_utilization is None
     assert infeasible.gpu_compute_utilization is None
     assert infeasible.total_queue_time_s is None
+    assert infeasible.local_hbm_energy_j is None
+    assert infeasible.local_hbm_idle_energy_j is None
+    assert infeasible.side_hbm_energy_j is None
+    assert infeasible.side_hbm_link_energy_j is None
+    assert infeasible.h2h_energy_j is None
+    assert infeasible.gpu_direct_energy_j is None
+    assert infeasible.total_energy_j is None
+    assert infeasible.decode_throughput_tokens_per_s is None
+    assert infeasible.prefill_throughput_tokens_per_s is None
+    assert infeasible.energy_per_token_j is None
 
     output = tmp_path / "capacity.csv"
     write_csv(rows, output)

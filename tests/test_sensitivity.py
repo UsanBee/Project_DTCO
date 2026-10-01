@@ -32,6 +32,17 @@ def test_baseline_config_reproduces_the_approved_feasible_point():
     assert baseline_config.channels.local_hbm.address_mapping.policy == "uniform"
     assert row.lane_rate_gbps == 24.0
     assert row.n_pillar == 8
+    assert row.batch == 8
+    assert (
+        baseline_config.channels.side_hbm.link_energy_pj_per_bit
+        == config.channels.side_hbm.link_energy_pj_per_bit
+        == 10.0
+    )
+    assert (
+        baseline_config.channels.local_hbm.stack.hbm_idle_power_w
+        == config.channels.local_hbm.stack.hbm_idle_power_w
+        == 0.4
+    )
     assert row.capacity_feasible is True
     assert row.tpot_s is not None
 
@@ -46,6 +57,16 @@ def test_relative_range_ignores_infeasible_points_and_uses_baseline():
     assert minimum == 1.0
     assert maximum == 3.0
     assert relative == 1.0
+
+
+def test_metric_range_returns_none_when_prefill_decode_metric_is_all_none():
+    minimum, maximum, relative = sensitivity.metric_range(
+        (None, None), baseline=None
+    )
+
+    assert minimum is None
+    assert maximum is None
+    assert relative is None
 
 
 def test_oat_report_covers_every_axis_and_preserves_semantics(tmp_path):
@@ -65,6 +86,10 @@ def test_oat_report_covers_every_axis_and_preserves_semantics(tmp_path):
         "address_mapping.policy": 2,
         "h2h.lane_rate_gbps": 3,
         "h2h.n_pillar": 4,
+        "batch": 5,
+        "side_hbm.link_energy_pj_per_bit": 4,
+        "local_hbm.stack.hbm_idle_power_w": 3,
+        "side_hbm_path": 1,
     }
     assert set(by_axis) == set(expected_point_counts)
     for axis, expected_count in expected_point_counts.items():
@@ -81,6 +106,9 @@ def test_oat_report_covers_every_axis_and_preserves_semantics(tmp_path):
         "comm_mode",
         "thermal_scenario",
         "address_mapping.policy",
+        "side_hbm.link_energy_pj_per_bit",
+        "local_hbm.stack.hbm_idle_power_w",
+        "side_hbm_path",
     }
     for axis in structurally_unmodeled:
         assert by_axis[axis].architecture_feasibility_applicable is False
@@ -97,13 +125,35 @@ def test_oat_report_covers_every_axis_and_preserves_semantics(tmp_path):
     assert "intentional worst-case hotspot" in mapping_notes
     assert "0.7, 0.1, 0.1, 0.1" in mapping_notes
 
+    side_link = by_axis["side_hbm.link_energy_pj_per_bit"]
+    assert side_link.baseline_value == "10.0"
+    assert json.loads(side_link.swept_values) == [0.54, 10.0, 20.0, 40.0]
+    assert side_link.tpot_s_relative_range == 0.0
+    assert side_link.communication_time_s_relative_range == 0.0
+    # The production baseline uses shared_h2h, where side-link energy is zero
+    # and traversed edge bytes are charged to h2h_energy_j instead.
+    assert side_link.energy_per_token_j_relative_range == 0.0
+
+    local_idle = by_axis["local_hbm.stack.hbm_idle_power_w"]
+    assert local_idle.baseline_value == "0.4"
+    assert json.loads(local_idle.swept_values) == [0.4, 2.0, 5.2]
+    assert local_idle.tpot_s_relative_range == 0.0
+    assert local_idle.communication_time_s_relative_range == 0.0
+    assert local_idle.energy_per_token_j_relative_range > 0.0
+
     output = tmp_path / "sensitivity.csv"
     sensitivity.write_sensitivity_csv(rows, output)
     with output.open(newline="", encoding="utf-8") as stream:
         written = list(csv.DictReader(stream))
-    assert len(written) == 8
+    assert len(written) == 12
     assert "architecture_feasibility_applicable" in written[0]
     assert "capacity_infeasible_fraction" in written[0]
+    assert "energy_per_token_j_min" in written[0]
+    assert "energy_per_token_j_max" in written[0]
+    assert "energy_per_token_j_relative_range" in written[0]
+    assert "decode_throughput_tokens_per_s_min" in written[0]
+    assert "decode_throughput_tokens_per_s_max" in written[0]
+    assert "decode_throughput_tokens_per_s_relative_range" in written[0]
 
 
 def test_module_cli_writes_one_row_per_axis(tmp_path):
@@ -114,6 +164,7 @@ def test_module_cli_writes_one_row_per_axis(tmp_path):
         .replace("n_pillar: [4, 8, 16, 32]", "n_pillar: [8]")
         .replace("model: Llama-70B", "model: Llama-7B")
         .replace("r_remote: [0, 0.1, 0.25, 0.5]", "r_remote: [0.1]")
+        .replace("batch: [1, 4, 8, 16, 32]", "batch: [1]")
     )
     config_path = tmp_path / "sensitivity-small.yaml"
     output_path = tmp_path / "sensitivity.csv"
@@ -136,9 +187,9 @@ def test_module_cli_writes_one_row_per_axis(tmp_path):
     )
 
     assert completed.returncode == 0
-    assert "Analyzed 8 sensitivity axes" in completed.stdout
+    assert "Analyzed 12 sensitivity axes" in completed.stdout
     with output_path.open(newline="", encoding="utf-8") as stream:
-        assert len(list(csv.DictReader(stream))) == 8
+        assert len(list(csv.DictReader(stream))) == 12
 
 
 def test_oat_calls_isolate_axes_and_use_native_r_zero_shadows(monkeypatch):
@@ -158,6 +209,14 @@ def test_oat_calls_isolate_axes_and_use_native_r_zero_shadows(monkeypatch):
             "address_mapping.policy": (mapping.policy, mapping.weights),
             "h2h.lane_rate_gbps": point_config.channels.h2h.lane_rate_gbps[0],
             "h2h.n_pillar": point_config.channels.h2h.n_pillar[0],
+            "batch": point_config.workload.batch_values[0],
+            "side_hbm.link_energy_pj_per_bit": (
+                point_config.channels.side_hbm.link_energy_pj_per_bit
+            ),
+            "local_hbm.stack.hbm_idle_power_w": (
+                point_config.channels.local_hbm.stack.hbm_idle_power_w
+            ),
+            "side_hbm_path": point_config.side_hbm_path_values[0],
         }
 
     def controlled_sweep(point_config):
@@ -182,6 +241,11 @@ def test_oat_calls_isolate_axes_and_use_native_r_zero_shadows(monkeypatch):
                 local_hbm_count=point["local_hbm_count"],
                 lane_rate_gbps=point["h2h.lane_rate_gbps"],
                 n_pillar=point["h2h.n_pillar"],
+                batch=point["batch"],
+                side_hbm_path=point["side_hbm_path"],
+                architecture_feasibility_applicable=(
+                    point["side_hbm_path"] == "independent"
+                ),
                 capacity_feasible=capacity_feasible,
                 architecture_feasible=architecture_feasible,
                 tpot_s=(
@@ -191,6 +255,16 @@ def test_oat_calls_isolate_axes_and_use_native_r_zero_shadows(monkeypatch):
                 ),
                 communication_time_s=(
                     float(point["h2h.lane_rate_gbps"])
+                    if capacity_feasible
+                    else None
+                ),
+                energy_per_token_j=(
+                    10.0 * float(point["local_hbm_count"])
+                    if capacity_feasible
+                    else None
+                ),
+                decode_throughput_tokens_per_s=(
+                    100.0 * float(point["local_hbm_count"])
                     if capacity_feasible
                     else None
                 ),
@@ -208,6 +282,23 @@ def test_oat_calls_isolate_axes_and_use_native_r_zero_shadows(monkeypatch):
     assert by_axis["local_hbm_count"].tpot_s_min == 2.0
     assert by_axis["local_hbm_count"].tpot_s_max == 4.0
     assert by_axis["local_hbm_count"].tpot_s_relative_range == 0.5
+    assert by_axis["local_hbm_count"].energy_per_token_j_min == 20.0
+    assert by_axis["local_hbm_count"].energy_per_token_j_max == 40.0
+    assert by_axis["local_hbm_count"].energy_per_token_j_relative_range == 0.5
+    assert (
+        by_axis["local_hbm_count"].decode_throughput_tokens_per_s_min
+        == 200.0
+    )
+    assert (
+        by_axis["local_hbm_count"].decode_throughput_tokens_per_s_max
+        == 400.0
+    )
+    assert (
+        by_axis[
+            "local_hbm_count"
+        ].decode_throughput_tokens_per_s_relative_range
+        == 0.5
+    )
     assert by_axis["address_mapping.policy"].flips_capacity_feasible is True
     assert by_axis["address_mapping.policy"].n_capacity_infeasible_points == 1
     assert by_axis["h2h.lane_rate_gbps"].flips_architecture_feasible is True
@@ -215,7 +306,8 @@ def test_oat_calls_isolate_axes_and_use_native_r_zero_shadows(monkeypatch):
 
     baseline_state = state(baseline)
     assert state(calls[0]) == baseline_state
-    cursor = 1
+    assert state(calls[1]) == baseline_state
+    cursor = 2
     for row in rows:
         values = json.loads(row.swept_values)
         for value in values:
