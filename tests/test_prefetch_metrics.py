@@ -99,6 +99,20 @@ def test_collective_transport_metrics_and_energy_use_collective_resources():
     )
 
 
+def test_collective_local_endpoint_energy_uses_local_memory_anchor():
+    """Collective source/endpoint accesses must not silently get zero energy."""
+    config, _, metrics = _result_and_metrics()
+    source_read = metrics.paths[TrafficClass.COLLECTIVE_SOURCE_READ]
+
+    assert source_read.transferred_bytes > 0.0
+    assert source_read.energy_j == pytest.approx(
+        source_read.transferred_bytes
+        * 8.0
+        * config.architectures[0].local_memory.energy_pj_per_bit
+        * 1e-12
+    )
+
+
 def test_prefetch_production_paths_have_no_unclassified_transfer_requests():
     """Every memory or transport request in the new engine must be tagged."""
     _, result, _ = _result_and_metrics()

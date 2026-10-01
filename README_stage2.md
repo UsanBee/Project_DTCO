@@ -111,7 +111,12 @@ profile, phase/start state, batch, decode-token count, weight policy, the three
 chunk sizes, and in-flight depth. Infeasible points remain in the CSV with
 identity and capacity reason populated; simulation-derived values are empty.
 Summary rows contain latency/throughput, residency, dynamic energy, local-lane
-mean/max utilization and the critical lane. `path_metrics_json` contains each
+mean/max utilization and the critical lane. They also report decode-token
+mean/median/maximum latency, cold/steady timing context, total/weight/KV
+prefetch stall, hidden-prefetch fraction, deadline-miss count, the limiting
+prefetch class, and KV-writeback deadline lateness. Weight and KV stall totals
+are independent causal diagnostics and can overlap; they must not be added to
+attribute critical-path time. `path_metrics_json` contains each
 declared path's actual bytes, request count, accumulated queue/service/fixed-
 latency time, and dynamic energy. Token/layer/lane traces are available only
 through `run_prefetch_simulation(..., detailed_trace=True)` and are not copied

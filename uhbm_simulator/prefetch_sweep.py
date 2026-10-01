@@ -9,6 +9,7 @@ from itertools import product
 import json
 import math
 from pathlib import Path
+import statistics
 
 from .prefetch_config import (
     CapacityMemoryConfig,
@@ -64,7 +65,19 @@ class PrefetchSweepRow:
     ttft_s: float | None
     first_token_latency_s: float | None
     tpot_s: float | None
+    token_latency_mean_s: float | None
+    token_latency_median_s: float | None
+    token_latency_max_s: float | None
+    steady_token_latency_mean_s: float | None
     decode_throughput_tokens_per_s: float | None
+    prefetch_stall_total_s: float | None
+    weight_prefetch_stall_s: float | None
+    kv_prefetch_stall_s: float | None
+    hidden_prefetch_fraction: float | None
+    prefetch_deadline_misses: int | None
+    prefetch_limiting_class: str | None
+    kv_writeback_deadline_misses: int | None
+    kv_writeback_max_lateness_s: float | None
     total_dynamic_energy_j: float | None
     local_lane_utilization_mean: float | None
     local_lane_utilization_max: float | None
@@ -85,6 +98,9 @@ _LOCAL_MEMORY_CLASSES = {
     TrafficClass.HBM_2_5D_GPU_READ,
     TrafficClass.GPU_HBM_2_5D_WRITE,
     TrafficClass.HBM_2_5D_PREFETCH_WRITE,
+    TrafficClass.COLLECTIVE_SOURCE_READ,
+    TrafficClass.COLLECTIVE_FINAL_WRITE,
+    TrafficClass.COLLECTIVE_FINAL_REREAD,
 }
 _SIDE_HBM_CLASSES = {
     TrafficClass.SIDE_HBM_READ,
@@ -337,6 +353,73 @@ def _sweep_row(
         if result.tpot_s is not None and result.tpot_s > 0.0
         else None
     )
+    token_latencies = result.token_latencies_s
+    token_mean = (
+        math.fsum(token_latencies) / len(token_latencies)
+        if token_latencies
+        else None
+    )
+    token_median = statistics.median(token_latencies) if token_latencies else None
+    token_max = max(token_latencies) if token_latencies else None
+    measured_layers = (
+        tuple(
+            timing
+            for timing in result.trace.layer_timings
+            if timing.token_index >= 0
+        )
+        if result.trace is not None
+        else ()
+    )
+    if measured_layers:
+        total_stall = math.fsum(
+            timing.prefetch_stall_s for timing in measured_layers
+        )
+        weight_stall = math.fsum(
+            max(0.0, max(timing.weight_lane_ready_s) - timing.previous_layer_end_s)
+            for timing in measured_layers
+        )
+        kv_stall = math.fsum(
+            max(0.0, max(timing.kv_lane_ready_s) - timing.previous_layer_end_s)
+            for timing in measured_layers
+        )
+        total_prefetch_time = math.fsum(
+            max(0.0, timing.layer_ready_s - timing.prefetch_launch_s)
+            for timing in measured_layers
+        )
+        hidden_fraction = (
+            min(1.0, max(0.0, 1.0 - total_stall / total_prefetch_time))
+            if total_prefetch_time > 0.0
+            else 1.0
+        )
+        deadline_misses = sum(
+            timing.prefetch_stall_s > 0.0 for timing in measured_layers
+        )
+        if weight_stall > kv_stall:
+            limiting_class = "weight"
+        elif kv_stall > weight_stall:
+            limiting_class = "kv"
+        elif weight_stall > 0.0:
+            limiting_class = "tie"
+        else:
+            limiting_class = None
+
+        next_launch = {
+            (timing.token_index, timing.layer_index): timing.prefetch_launch_s
+            for timing in measured_layers
+        }
+        writeback_lateness = []
+        for timing in measured_layers:
+            deadline = next_launch.get((timing.token_index + 1, timing.layer_index))
+            if deadline is not None and timing.writeback_end_s is not None:
+                writeback_lateness.append(max(0.0, timing.writeback_end_s - deadline))
+        writeback_misses = sum(value > 0.0 for value in writeback_lateness)
+        writeback_max_lateness = max(writeback_lateness, default=0.0)
+    else:
+        total_stall = weight_stall = kv_stall = hidden_fraction = None
+        deadline_misses = None
+        limiting_class = None
+        writeback_misses = None
+        writeback_max_lateness = None
     reason = result.infeasibility_reason
     return PrefetchSweepRow(
         architecture=architecture.name,
@@ -364,7 +447,23 @@ def _sweep_row(
         ttft_s=result.ttft_s,
         first_token_latency_s=result.first_token_latency_s,
         tpot_s=result.tpot_s,
+        token_latency_mean_s=token_mean,
+        token_latency_median_s=token_median,
+        token_latency_max_s=token_max,
+        steady_token_latency_mean_s=(
+            token_mean
+            if point.workload.start_state_values[0] == "steady_state"
+            else None
+        ),
         decode_throughput_tokens_per_s=decode_throughput,
+        prefetch_stall_total_s=total_stall,
+        weight_prefetch_stall_s=weight_stall,
+        kv_prefetch_stall_s=kv_stall,
+        hidden_prefetch_fraction=hidden_fraction,
+        prefetch_deadline_misses=deadline_misses,
+        prefetch_limiting_class=limiting_class,
+        kv_writeback_deadline_misses=writeback_misses,
+        kv_writeback_max_lateness_s=writeback_max_lateness,
         total_dynamic_energy_j=(
             metrics.total_dynamic_energy_j if metrics is not None else None
         ),
@@ -383,7 +482,7 @@ def run_prefetch_sweep(
     config: PrefetchSimulationConfig,
 ) -> tuple[PrefetchSweepRow, ...]:
     return tuple(
-        _sweep_row(point, run_prefetch_simulation(point, detailed_trace=False))
+        _sweep_row(point, run_prefetch_simulation(point, detailed_trace=True))
         for point in expand_prefetch_points(config)
     )
 

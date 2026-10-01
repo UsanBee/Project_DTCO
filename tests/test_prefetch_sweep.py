@@ -1,5 +1,6 @@
 import csv
 from dataclasses import replace
+import math
 
 from test_layer_prefetch_simulator import _config
 
@@ -115,3 +116,21 @@ def test_summary_csv_contains_axes_and_metrics_but_no_detail_explosion(tmp_path)
     assert all("layer_timing" not in name for name in record)
     assert all("lane_ready" not in name for name in record)
 
+
+def test_summary_reports_token_series_and_prefetch_deadline_metrics():
+    """Dropping the spec-required timing summaries from each row must fail."""
+    from uhbm_simulator.prefetch_sweep import run_prefetch_sweep
+
+    row = run_prefetch_sweep(_config(decode_tokens=2))[0]
+
+    assert row.token_latency_mean_s == row.tpot_s
+    assert row.token_latency_median_s is not None
+    assert row.token_latency_max_s >= row.token_latency_mean_s
+    assert row.prefetch_stall_total_s >= 0.0
+    assert row.weight_prefetch_stall_s >= 0.0
+    assert row.kv_prefetch_stall_s >= 0.0
+    assert 0.0 <= row.hidden_prefetch_fraction <= 1.0
+    assert row.prefetch_deadline_misses >= 0
+    assert row.prefetch_limiting_class in {"weight", "kv", "tie", None}
+    assert row.kv_writeback_deadline_misses == 0
+    assert math.isclose(row.kv_writeback_max_lateness_s, 0.0)

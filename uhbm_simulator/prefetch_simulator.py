@@ -42,6 +42,8 @@ class LayerTiming:
     layer_index: int
     prefetch_launch_s: float
     lane_ready_s: tuple[float, ...]
+    weight_lane_ready_s: tuple[float, ...]
+    kv_lane_ready_s: tuple[float, ...]
     layer_ready_s: float
     previous_layer_end_s: float
     compute_start_s: float
@@ -73,6 +75,13 @@ class TokenTiming:
 class PrefetchTrace:
     layer_timings: tuple[LayerTiming, ...]
     token_timings: tuple[TokenTiming, ...]
+
+
+@dataclass(frozen=True)
+class _LayerPrefetchReady:
+    lane_ready_s: tuple[float, ...]
+    weight_lane_ready_s: tuple[float, ...]
+    kv_lane_ready_s: tuple[float, ...]
 
 
 @dataclass(frozen=True)
@@ -240,6 +249,7 @@ def _transfer(
             inflight_slots=pool,
         )
     )
+    return env.now
 
 
 def _prefetch_layer(
@@ -261,6 +271,9 @@ def _prefetch_layer(
         lane_plan = plan.lanes[lane]
         resources = rank_resources[rank]
         events = []
+        launched_at = env.now
+        weight_event = None
+        kv_event = None
         # Stable tie order is weight before KV for reproducibility. No priority
         # is implied once requests reach the shared FCFS destination resource.
         if effective_policy == "streaming" and lane_plan.weight_bytes > 0.0:
@@ -274,8 +287,7 @@ def _prefetch_layer(
                 if architecture.kind == "b2_uhbm"
                 else TrafficClass.HBM_2_5D_PREFETCH_WRITE
             )
-            events.append(
-                env.process(
+            weight_event = env.process(
                     _transfer(
                         env,
                         amount=lane_plan.weight_bytes,
@@ -290,14 +302,13 @@ def _prefetch_layer(
                         ),
                         pool=pools[rank][lane],
                     )
-                )
             )
+            events.append(weight_event)
         if (
             architecture.kind == "b2_uhbm"
             and lane_plan.historical_kv_bytes > 0.0
         ):
-            events.append(
-                env.process(
+            kv_event = env.process(
                     _transfer(
                         env,
                         amount=lane_plan.historical_kv_bytes,
@@ -312,11 +323,15 @@ def _prefetch_layer(
                         ),
                         pool=pools[rank][lane],
                     )
-                )
             )
+            events.append(kv_event)
         if events:
             yield env.all_of(events)
-        return env.now
+        return (
+            env.now,
+            weight_event.value if weight_event is not None else launched_at,
+            kv_event.value if kv_event is not None else launched_at,
+        )
 
     for rank in range(config.workload.tp):
         rank_lane_ready.append(
@@ -325,7 +340,12 @@ def _prefetch_layer(
     yield env.all_of(
         [event for rank_events in rank_lane_ready for event in rank_events]
     )
-    return tuple(event.value for event in rank_lane_ready[0])
+    rank_zero = tuple(event.value for event in rank_lane_ready[0])
+    return _LayerPrefetchReady(
+        lane_ready_s=tuple(value[0] for value in rank_zero),
+        weight_lane_ready_s=tuple(value[1] for value in rank_zero),
+        kv_lane_ready_s=tuple(value[2] for value in rank_zero),
+    )
 
 
 def _local_access(
@@ -553,7 +573,8 @@ def run_prefetch_simulation(
         previous_layer_end = token_started
         for layer_index, plan in enumerate(plans):
             yield prefetch_events[layer_index]
-            lane_ready = prefetch_events[layer_index].value
+            readiness = prefetch_events[layer_index].value
+            lane_ready = readiness.lane_ready_s
             layer_ready = max(lane_ready)
             compute_start = env.now
             launch_prefetch(layer_index + 1)
@@ -643,6 +664,8 @@ def run_prefetch_simulation(
                     layer_index=layer_index,
                     prefetch_launch_s=prefetch_launches[layer_index],
                     lane_ready_s=lane_ready,
+                    weight_lane_ready_s=readiness.weight_lane_ready_s,
+                    kv_lane_ready_s=readiness.kv_lane_ready_s,
                     layer_ready_s=layer_ready,
                     previous_layer_end_s=previous_layer_end,
                     compute_start_s=compute_start,

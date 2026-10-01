@@ -88,6 +88,9 @@ def test_next_layer_prefetch_launches_at_current_layer_start_and_waits_all_lanes
     first, second = result.trace.layer_timings[:2]
 
     assert second.prefetch_launch_s == first.compute_start_s
+    assert first.layer_ready_s == max(
+        max(first.weight_lane_ready_s), max(first.kv_lane_ready_s)
+    )
     assert first.compute_start_s == max(first.lane_ready_s)
     assert second.compute_start_s >= max(second.lane_ready_s)
     assert len(first.lane_ready_s) == 8
@@ -176,4 +179,3 @@ def test_path_byte_accounting_is_finite_and_nonnegative():
     result = run_prefetch_simulation(_config(), detailed_trace=True)
     assert result.path_bytes
     assert all(math.isfinite(value) and value >= 0.0 for value in result.path_bytes.values())
-
